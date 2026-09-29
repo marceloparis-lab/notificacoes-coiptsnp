@@ -449,6 +449,42 @@
     return Array.from(tags);
   }
 
+  /** Extrai, como texto editavel (**negrito**), os paragrafos de um bloco {#nome}...{/nome} do modelo. */
+  async function extrairTextoBloco(template, nome, opts) {
+    opts = opts || {};
+    const JSZip = opts.JSZip || root.JSZip;
+    const DP = opts.DOMParser || root.DOMParser;
+    const zip = await JSZip.loadAsync(template);
+    const doc = new DP().parseFromString(await zip.file('word/document.xml').async('string'), 'application/xml');
+    const ps = byTag(doc, W, 'p');
+    let dentro = false;
+    const linhas = [];
+    for (const p of ps) {
+      normalize(p);
+      const t = paraText(p).trim();
+      if (t === '{#' + nome + '}') { dentro = true; continue; }
+      if (t === '{/' + nome + '}') break;
+      if (!dentro) continue;
+      const segs = [];
+      for (const r of byTag(p, W, 'r')) {
+        const txt = byTag(r, W, 't').map((x) => x.textContent).join('');
+        if (!txt) continue;
+        const rPr = kids(r).find((c) => isEl(c, 'rPr'));
+        const b = rPr ? kids(rPr).find((c) => isEl(c, 'b')) : null;
+        const bold = !!b && !/^(0|false)$/.test(b.getAttributeNS(W, 'val') || '');
+        const ult = segs[segs.length - 1];
+        if (ult && ult.bold === bold) ult.txt += txt; else segs.push({ txt, bold });
+      }
+      const linha = segs.map((sg) => {
+        if (!sg.bold || !sg.txt.trim()) return sg.txt;
+        const m = /^(\s*)(.*?)(\s*)$/.exec(sg.txt);
+        return m[1] + '**' + m[2] + '**' + m[3];
+      }).join('').replace(/[ \t]{2,}/g, ' ').trim();
+      linhas.push(linha);
+    }
+    return linhas.join('\n');
+  }
+
   /* ------------------------------------------------------------------ */
   /* Montagem dos dados a partir do cadastro + notificacao + configuracao */
   const E = () => root.Extenso || (typeof require === 'function' ? require('./extenso.js') : null);
@@ -519,10 +555,12 @@
       rotulo_coordenadores: coords.length > 1 ? 'Coordenadores' : 'Coordenador',
       fotos,
       tem_fotos: fotos.length > 0,
+      sancoes_padrao: !(reg.sancoes && reg.sancoes.trim()),
+      sancoes_personalizadas: reg.sancoes && reg.sancoes.trim() ? [{ texto: reg.sancoes.trim() }] : [],
     };
   }
 
-  const api = { gerar, montarDados, listarMarcadores, textoEquipe, imageSize };
+  const api = { gerar, montarDados, listarMarcadores, extrairTextoBloco, textoEquipe, imageSize };
   if (typeof module === 'object' && module.exports) module.exports = api;
   else root.DocGen = api;
 })(typeof self !== 'undefined' ? self : this);

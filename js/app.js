@@ -329,7 +329,8 @@
     const info = h('table', { class: 'tabela-info' },
       [['Notificada', r.n_nome], [ROTULO[r.tipo] + ' nº', r.numero], ['Processo', r.processo],
         ['Valor', r.valor ? 'R$ ' + X.formatarMoeda(X.parseMoeda(r.valor)) : ''],
-        r.tipo === 'convenio' ? ['Vigência', X.dataBR(r.vigencia)] : ['O.S. nº', r.os_numero]]
+        r.tipo === 'convenio' ? ['Vigência', X.dataBR(r.vigencia)] : ['O.S. nº', r.os_numero],
+        ['Sanções', r.sancoes && r.sancoes.trim() ? 'Personalizadas' : 'Padrão do modelo']]
         .filter((x) => x[1]).map(([k, v]) => h('tr', {}, h('td', {}, k), h('td', {}, v))));
 
     const cab = h('div', { class: 'card' },
@@ -523,6 +524,23 @@
       campo('Última notificação emitida antes de usar o app', ultimaInp, 'Ex.: se já foram emitidas 5 notificações, informe 5 (a próxima será a 6ª). Se ficar vazio, o app pergunta na primeira notificação.'),
       campo('Prazo para resposta (dias úteis)', h('input', { type: 'number', min: '1', value: r.prazo_dias || CONFIG.prazo_padrao, oninput: (e) => { r.prazo_dias = parseInt(e.target.value, 10) || CONFIG.prazo_padrao; } })));
 
+    const sancArea = inputArea(r, 'sancoes', { placeholder: 'Em branco = usa as sanções do modelo do Word.', style: { minHeight: '180px' } });
+    const secSanc = h('div', { class: 'card' }, h('h2', {}, 'Sanções administrativas'),
+      h('p', { class: 'sub' }, 'Texto da seção “Possíveis sanções administrativas” deste ' + ROTULO[tipo].toLowerCase() + '. ' +
+        'Deixe em branco para usar o texto padrão do modelo.'),
+      sancArea,
+      h('div', { class: 'dica' }, 'Cada linha vira um parágrafo. Use **texto** para negrito (ex.: **16.1.** Comete infração…).'),
+      h('div', { class: 'acoes' },
+        h('button', { class: 'btn peq', type: 'button', onclick: async () => {
+          if (r.sancoes && r.sancoes.trim() && !(await confirmar('Substituir o texto atual pelo texto padrão do modelo?', 'Substituir'))) return;
+          try {
+            const txt = await DocGen.extrairTextoBloco(await modeloDocx(tipo), 'sancoes_padrao');
+            if (!txt) { toast('O modelo atual não tem o bloco de sanções marcado.', true); return; }
+            r.sancoes = txt; sancArea.value = txt; toast('Texto padrão carregado — edite o que precisar.');
+          } catch (e) { toast(e.message, true); }
+        } }, '⇩ Carregar texto padrão para editar'),
+        h('button', { class: 'btn peq', type: 'button', onclick: () => { r.sancoes = ''; sancArea.value = ''; toast('Usará o texto padrão do modelo.'); } }, 'Usar padrão do modelo')));
+
     const salvar = async () => {
       if (!r.apelido || !r.apelido.trim()) { toast('Informe o nome curto.', true); return; }
       r.coordenadores = coords.map((c) => c.pessoaId).filter(Boolean);
@@ -541,7 +559,7 @@
           location.replace('#/' + (tipo === 'convenio' ? 'convenios' : 'contratos'));
         }
       } }, 'Excluir') : null));
-    rc($main, secDados, secNotificada, secAss, secPad, acoes);
+    rc($main, secDados, secNotificada, secAss, secSanc, secPad, acoes);
   }
 
   /* ================================================================== */
