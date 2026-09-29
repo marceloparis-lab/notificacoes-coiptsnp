@@ -5,8 +5,8 @@
  */
 window.APP_CONFIG = {
   // URL do Apps Script publicado como "App da Web" (termina em /exec)
-  API_URL: '',
+  API_URL: 'https://script.google.com/macros/s/AKfycbzP4Uvi-Jhx5PJZm4nVl_w1D6Ve_PPNcyzJ7XAhKZRYSNdTtIZbiku4RoYeQAIjaFsr5g/exec',
 
   // "ID do cliente" OAuth criado no Google Cloud (termina em .apps.googleusercontent.com)
-  GOOGLE_CLIENT_ID: '',
+  GOOGLE_CLIENT_ID: '567623682828-85i3qvis0lki5mvh5ia0skkv00pm0bgv.apps.googleusercontent.com',
 };
