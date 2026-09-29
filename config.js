@@ -8,5 +8,5 @@ window.APP_CONFIG = {
   API_URL: 'https://script.google.com/macros/s/AKfycbxP8LPFWfpXLqNj8naGvr3h6sYcv5erwpcBGXcyG4SAjWpsSMIs1BH_MT4jhoqLD_BXDw/exec',
 
   // "ID do cliente" OAuth criado no Google Cloud (termina em .apps.googleusercontent.com)
-  GOOGLE_CLIENT_ID: 'AKfycbxP8LPFWfpXLqNj8naGvr3h6sYcv5erwpcBGXcyG4SAjWpsSMIs1BH_MT4jhoqLD_BXDw',
+  GOOGLE_CLIENT_ID: '567623682828-85i3qvis0lki5mvh5ia0skkv00pm0bgv.apps.googleusercontent.com',
 };
