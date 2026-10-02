@@ -30,10 +30,23 @@
   const rc = (el, ...k) => el.replaceChildren(...limpar(k));
   const ap = (el, ...k) => el.append(...limpar(k));
 
+  const prefCamera = () => { try { return localStorage.getItem('camera_pref') || 'app'; } catch (e) { return 'app'; } };
+  function aplicarTema(t) {
+    try { localStorage.setItem('tema', t); } catch (e) { /* */ }
+    const escuro = t === 'escuro' || (t === 'auto' && window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches);
+    document.documentElement.setAttribute('data-theme', escuro ? 'dark' : 'light');
+    const m = document.getElementById('meta-tema');
+    if (m) m.setAttribute('content', escuro ? '#0f1020' : '#f3f4fa');
+  }
+  if (window.matchMedia) matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { let t = 'auto'; try { t = localStorage.getItem('tema') || 'auto'; } catch (e) { /* */ } if (t === 'auto') aplicarTema('auto'); });
+
   function toast(msg, erro) {
     const t = h('div', { class: 'toast' + (erro ? ' erro' : '') }, msg);
     document.body.appendChild(t);
-    setTimeout(() => t.remove(), erro ? 5000 : 2600);
+    // vários avisos ao mesmo tempo: empilha (o mais novo embaixo) em vez de um cobrir o outro
+    const empilhar = () => { let soma = 0; const ts = [...document.querySelectorAll('body > .toast')]; for (let i = ts.length - 1; i >= 0; i--) { ts[i].style.marginBottom = soma + 'px'; soma += ts[i].offsetHeight + 8; } };
+    empilhar();
+    setTimeout(() => { t.remove(); empilhar(); }, erro ? 5000 : 2600);
   }
 
   function modal(titulo, conteudo, botoes) {
@@ -69,6 +82,10 @@
   function campo(rotulo, input, dica) {
     return h('label', { class: 'campo' }, h('span', {}, rotulo), input, dica ? h('div', { class: 'dica' }, dica) : null);
   }
+  /* campo sem <label>: necessario quando o conteudo tem varios botoes (um <label> repassa o clique ao 1o botao) */
+  function campoBloco(rotulo, conteudo, dica) {
+    return h('div', { class: 'campo-bloco' }, h('span', {}, rotulo), conteudo, dica ? h('div', { class: 'dica' }, dica) : null);
+  }
   function inputTxt(obj, chave, attrs) {
     return h('input', Object.assign({ type: 'text', value: obj[chave] == null ? '' : obj[chave], oninput: (e) => { obj[chave] = e.target.value; } }, attrs || {}));
   }
@@ -96,7 +113,106 @@
   function nomeArquivo(s) { return String(s).replace(/[\\/:*?"<>|]+/g, '-').replace(/\s+/g, ' ').trim(); }
   const dataHoraBR = (iso) => { if (!iso) return ''; const d = new Date(iso); return d.toLocaleDateString('pt-BR') + ' ' + d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }); };
   const ROTULO = { contrato: 'Contrato', convenio: 'Convênio' };
+  // data/hora completa (ISO em UTC) -> data local dd/mm/aaaa (evita trocar o dia depois das 20h)
+  const dataLocalBR = (iso) => { if (!iso) return ''; const s = String(iso); if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return X.dataBR(s); const d = new Date(s); return isNaN(d) ? '' : X.dataBR(d); };
   const PLURAL = { contrato: 'Contratos', convenio: 'Convênios' };
+
+  /* ---------- Status da obra ---------- */
+  const STATUS_OBRA = {
+    contrato: ['Obra não iniciada', 'Em execução', 'Paralisada', 'Contrato rescindido', 'Sem vigência', 'Em recebimento provisório', 'Obra concluída'],
+    convenio: ['Em licitação', 'Obra não iniciada', 'Em execução', 'Paralisada', 'Contrato rescindido', 'Contrato rescindido – em processo de relicitação', 'Sem vigência', 'Em prestação de contas', 'Obra concluída'],
+  };
+  const COR_STATUS = {
+    'Em execução': 'ok', 'Obra concluída': 'ok', 'Obra não iniciada': 'neutro', 'Em licitação': 'info', 'Em recebimento provisório': 'info', 'Em prestação de contas': 'info',
+    'Paralisada': 'alerta', 'Contrato rescindido': 'perigo', 'Contrato rescindido – em processo de relicitação': 'perigo', 'Sem vigência': 'perigo',
+  };
+  // obra encerrada: prazo vencido não acende alerta
+  const ENCERRA_PADRAO = ['Obra concluída', 'Contrato rescindido', 'Contrato rescindido – em processo de relicitação', 'Sem vigência'];
+  const CORES_STATUS = [['ok', 'Verde'], ['alerta', 'Amarelo'], ['perigo', 'Vermelho'], ['info', 'Azul'], ['neutro', 'Cinza']];
+  const statusPadrao = (tipo) => STATUS_OBRA[tipo].map((nome) => ({ nome, cor: COR_STATUS[nome] || 'neutro', encerra: ENCERRA_PADRAO.includes(nome) }));
+  /* Lista de status (editável pelo administrador em Ajustes › Status das obras; vale para toda a equipe) */
+  function listaStatus(tipo) {
+    const l = CONFIG && CONFIG.status_obra && CONFIG.status_obra[tipo];
+    return Array.isArray(l) && l.length ? l.filter((x) => x && x.nome) : statusPadrao(tipo);
+  }
+  function infoStatus(nome, tipo) {
+    if (!nome) return null;
+    const outro = tipo === 'convenio' ? 'contrato' : 'convenio';
+    return listaStatus(tipo).find((x) => x.nome === nome) || listaStatus(outro).find((x) => x.nome === nome)
+      || (STATUS_OBRA.contrato.includes(nome) || STATUS_OBRA.convenio.includes(nome) ? { nome, cor: COR_STATUS[nome] || 'neutro', encerra: ENCERRA_PADRAO.includes(nome) } : null);
+  }
+  const etq = (txt, cls, title) => h('span', { class: 'etq ' + (cls || ''), title: title || null }, txt);
+  const etqStatus = (r) => (r.status_obra ? etq(r.status_obra, ((infoStatus(r.status_obra, r.tipo) || {}).cor || '').replace('neutro', '')) : null);
+
+  /* ---------- Prazos em dias corridos (execução / vigência) ---------- */
+  function diasAte(iso) {
+    if (!iso) return null;
+    const hoje = new Date(X.hojeISO() + 'T00:00:00'), d = new Date(String(iso).slice(0, 10) + 'T00:00:00');
+    if (isNaN(d)) return null;
+    return Math.round((d - hoje) / 86400000);
+  }
+  function infoPrazo(iso) {
+    const n = diasAte(iso);
+    if (n === null) return null;
+    const txt = n > 1 ? 'faltam ' + n + ' dias' : n === 1 ? 'falta 1 dia' : n === 0 ? 'termina hoje' : 'vencido há ' + -n + (n === -1 ? ' dia' : ' dias');
+    return { n, txt, cls: n < 0 ? 'perigo' : n <= 30 ? 'alerta' : 'ok' };
+  }
+  function prazosDoRegistro(r) {
+    const out = [];
+    if (r.tipo === 'contrato' && r.prazo_execucao) out.push({ rot: 'Execução', data: r.prazo_execucao, info: infoPrazo(r.prazo_execucao) });
+    if (r.vigencia) out.push({ rot: r.tipo === 'convenio' ? 'Vigência do Convênio' : 'Vigência Contratual', data: r.vigencia, info: infoPrazo(r.vigencia) });
+    // obra encerrada (concluída, rescindida, sem vigência): prazo vencido não é alerta
+    const encerrada = !!(infoStatus(r.status_obra, r.tipo) || {}).encerra;
+    return out.filter((p) => p.info).map((p) => (encerrada && p.info.n < 0 ? Object.assign({}, p, { info: Object.assign({}, p.info, { cls: '' }) }) : p));
+  }
+
+  /* ---------- Prazo das notificações (dias úteis, a partir do dia seguinte ao envio) ---------- */
+  const isoDe = (d) => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  function feriados() {
+    const set = new Set();
+    String((CONFIG && CONFIG.feriados) || '').split(/[\n,;]+/).forEach((t) => {
+      t = t.trim();
+      let m = /(\d{1,2})\/(\d{1,2})\/(\d{4})/.exec(t);
+      if (m) set.add(m[3] + '-' + m[2].padStart(2, '0') + '-' + m[1].padStart(2, '0'));
+      else if ((m = /\d{4}-\d{2}-\d{2}/.exec(t))) set.add(m[0]);
+      else if ((m = /(\d{1,2})\/(\d{1,2})\/(\d{2})\b/.exec(t))) set.add('20' + m[3] + '-' + m[2].padStart(2, '0') + '-' + m[1].padStart(2, '0'));
+      else if ((m = /(\d{1,2})\/(\d{1,2})(?!\/?\d)/.exec(t))) set.add(m[2].padStart(2, '0') + '-' + m[1].padStart(2, '0')); // "25/12": todo ano
+    });
+    return set;
+  }
+  function ehDiaUtil(d, fer) { const w = d.getDay(), iso = isoDe(d); return w !== 0 && w !== 6 && !fer.has(iso) && !fer.has(iso.slice(5)); }
+  /* prazo final sempre recalculado (um feriado cadastrado depois do envio passa a contar) */
+  const prazoDe = (n) => (n.enviadaEm ? prazoFinalUteis(n.enviadaEm, n.prazoDiasEnvio || n.prazo_dias) : n.prazoFinal);
+  function prazoFinalUteis(isoEnvio, dias) {
+    const fer = feriados();
+    const d = new Date(String(isoEnvio).slice(0, 10) + 'T12:00:00');
+    let c = 0;
+    while (c < Math.max(1, +dias || 3)) { d.setDate(d.getDate() + 1); if (ehDiaUtil(d, fer)) c++; }
+    return isoDe(d);
+  }
+  function uteisRestantes(isoFim) {
+    if (!isoFim || isNaN(new Date(String(isoFim).slice(0, 10) + 'T12:00:00'))) return 0;
+    const fer = feriados();
+    const hoje = new Date(X.hojeISO() + 'T12:00:00'), fim = new Date(String(isoFim).slice(0, 10) + 'T12:00:00');
+    if (fim < hoje) return -Math.round((hoje - fim) / 86400000); // negativo = dias corridos de atraso
+    let c = 0; const d = new Date(hoje);
+    while (d < fim) { d.setDate(d.getDate() + 1); if (ehDiaUtil(d, fer)) c++; }
+    return c;
+  }
+  const quemResponde = (tipo) => (tipo === 'convenio' ? 'a prefeitura' : 'a empresa');
+  /* situação de uma notificação: rascunho, emitida sem envio, aguardando resposta, prazo encerrado, respondida */
+  function situacaoNotif(n) {
+    if (n.status !== 'emitida') return { k: 'rascunho', txt: 'Rascunho', cls: 'alerta', ordem: 4 };
+    if (!n.enviadaEm) return { k: 'nao_enviada', txt: 'Emitida · não enviada', cls: 'info', ordem: 2 };
+    if (n.respondidaEm) {
+      const atraso = prazoDe(n) && n.respondidaEm > prazoDe(n);
+      return { k: 'respondida', txt: 'Respondida em ' + X.dataBR(n.respondidaEm) + (atraso ? ' (fora do prazo)' : ''), cls: 'ok', ordem: 3 };
+    }
+    const pf = prazoDe(n);
+    const r = uteisRestantes(pf);
+    if (r < 0) return { k: 'vencida', txt: 'Prazo encerrado em ' + X.dataBR(pf) + ' (há ' + -r + (r === -1 ? ' dia)' : ' dias)'), cls: 'perigo', ordem: 0, restante: r };
+    return { k: 'aguardando', txt: r === 0 ? 'Prazo termina hoje' : r === 1 ? 'Falta 1 dia útil' : 'Faltam ' + r + ' dias úteis', cls: r <= 1 ? 'alerta' : 'info', ordem: 1, restante: r };
+  }
 
   /* ================================================================== */
   /* Estado, usuario e permissoes                                        */
@@ -129,6 +245,10 @@
     },
     funcao_padrao: { convenio: ['Fiscal do Convênio'], contrato: ['Fiscal do Contrato', 'Fiscal Suplente do Contrato'] },
     modelos: {},
+    pasta_fotos: '{tipo}-{numero}/{data}',
+    feriados: '',
+    status_obra: { contrato: statusPadrao('contrato'), convenio: statusPadrao('convenio') },
+    fila_atendidos: 'ENCAMINHADO - CCP', // STATUS da planilha da fila que significam "já atendido pela Fiscalização" (um por linha)
   };
 
   const PESSOAS_INICIAIS = [
@@ -159,18 +279,58 @@
   }
   App.config = () => CONFIG;
 
+  /* Pasta e nome da foto no Google Drive (ex.: Fotos/Conv-013-2023/29.09.2026/14.21.05 - IRREGULARIDADE - ....jpg).
+     A mesma regra existe no Code.gs (segmentosFoto_), usada para organizar fotos antigas. */
+  const doisDig = (n) => String(n).padStart(2, '0');
+  function segmentosPasta(f, r, v, padrao) {
+    r = r || {};
+    let iso = v && v.data;
+    if (!iso) { const d = new Date(f.dataHora || Date.now()); iso = d.getFullYear() + '-' + doisDig(d.getMonth() + 1) + '-' + doisDig(d.getDate()); }
+    const d = String(iso).split('-');
+    const val = {
+      tipo: r.tipo === 'convenio' ? 'Conv' : 'Contr',
+      numero: nomeArquivo(r.numero || r.apelido || 'sem-numero'),
+      apelido: nomeArquivo(r.apelido || ''),
+      data: d.length === 3 ? d[2] + '.' + d[1] + '.' + d[0] : 'sem-data',
+      ano: d[0] || '',
+      visita: v ? 'Visita ' + v.numero : 'Sem visita',
+    };
+    return String(padrao || CONFIG_PADRAO.pasta_fotos).split('/').map((seg) => nomeArquivo(seg.replace(/\{(\w+)\}/g, (m, k) => (val[k] != null ? val[k] : '')))).filter(Boolean);
+  }
+  App.infoFotoDrive = async function (f) {
+    const r = await DB.get('registros', f.registroId);
+    const v = f.visitaId ? await DB.get('visitas', f.visitaId) : null;
+    const dt = f.dataHora ? new Date(f.dataHora) : null;
+    const hora = dt ? doisDig(dt.getHours()) + '.' + doisDig(dt.getMinutes()) + '.' + doisDig(dt.getSeconds()) : '';
+    const nome = [hora, f.irregular ? 'IRREGULARIDADE' : '', String(f.descricao || '').slice(0, 60)].filter(Boolean).join(' - ');
+    return { pastas: segmentosPasta(f, r, v, (CONFIG || {}).pasta_fotos), nome: nomeArquivo(nome) };
+  };
+
   /* ================================================================== */
   /* Sincronizacao - indicador                                           */
   /* ================================================================== */
   const chip = document.getElementById('chip-sync');
   const txtSync = document.getElementById('txt-sync');
   const TXT_ESTADO = { local: 'Neste aparelho', ok: 'Sincronizado', sincronizando: 'Sincronizando…', erro: 'Erro ao sincronizar', offline: 'Offline', login: 'Entrar', sem_acesso: 'Sem acesso' };
-  async function atualizarChip() {
+  // contar pendências lê o banco inteiro: no máximo a cada 3 s (o rótulo muda na hora)
+  let pendCache = 0, contagemEm = 0, timerContagem = null;
+  function desenharChip() {
     const st = Sync.habilitado() ? (navigator.onLine ? Sync.estado : 'offline') : 'local';
     chip.className = 'chip-sync ' + st;
+    const rot = st === 'offline' && navigator.onLine && Sync.habilitado() ? 'Sem conexão' : (TXT_ESTADO[st] || st);
+    txtSync.textContent = rot + (pendCache && st !== 'sincronizando' ? ' · ' + pendCache + ' pend.' : '');
+  }
+  async function contarPendentes() {
+    contagemEm = Date.now();
     let pend = 0;
-    if (Sync.habilitado()) for (const e of ['registros', 'pessoas', 'notificacoes', 'fotos', 'config']) pend += (await DB.all(e)).filter((o) => o._pendente).length;
-    txtSync.textContent = (TXT_ESTADO[st] || st) + (pend && st !== 'sincronizando' ? ' · ' + pend + ' pend.' : '');
+    try { if (Sync.habilitado()) for (const e of ['registros', 'pessoas', 'visitas', 'notificacoes', 'fotos', 'config']) pend += (await DB.all(e)).filter((o) => o._pendente).length; } catch (e) { /* */ }
+    pendCache = pend;
+    desenharChip();
+  }
+  function atualizarChip() {
+    desenharChip();
+    clearTimeout(timerContagem);
+    timerContagem = setTimeout(contarPendentes, Math.max(0, 3000 - (Date.now() - contagemEm)));
   }
   Sync.on(() => {
     atualizarChip();
@@ -181,7 +341,7 @@
   chip.addEventListener('click', () => {
     if (!Sync.habilitado()) { toast('Modo local: os dados ficam só neste aparelho. Veja Ajustes para ativar o compartilhamento.'); return; }
     if (Sync.estado === 'login' || !Sync.token()) { location.hash = '#/config'; return; }
-    if (Sync.estado === 'erro') toast(Sync.erro || 'Erro', true);
+    if ((Sync.estado === 'erro' || Sync.estado === 'offline') && Sync.erro) toast(Sync.erro, Sync.estado === 'erro');
     Sync.sincronizar();
   });
   let timerSync = null;
@@ -189,12 +349,45 @@
     atualizarChip();
     if (!Sync.habilitado()) return;
     clearTimeout(timerSync);
+    Sync._atividade = Date.now(); // há movimento: procura novidades dos colegas com mais frequência
     timerSync = setTimeout(() => Sync.sincronizar(), 2500);
   };
+  /* Dados novos de outro aparelho: redesenha a tela sem voltar ao topo, sem apagar o que foi digitado na
+     busca e sem fechar o teclado (se o usuário estiver digitando, espera ele terminar). */
+  let redesenhoPendente = false;
+  async function redesenharSeSeguro() {
+    const r = location.hash;
+    if (document.querySelector('.modal-fundo') || document.querySelector('.cv')) return; // não mexe na tela com janela ou câmera abertas
+    if (!/notificacao|editar|novo|config|visita|coleta|irregularidade/.test(r)) redesenharMantendo();
+    else if (App._atualizarTela) { try { await App._atualizarTela(); } catch (e) { /* */ } } // telas com edição: atualiza só as partes seguras
+  }
+  function redesenharMantendo() {
+    const ativo = document.activeElement;
+    if (ativo && $main.contains(ativo) && /^(INPUT|TEXTAREA|SELECT)$/.test(ativo.tagName)) {
+      if (!redesenhoPendente) {
+        redesenhoPendente = true;
+        const seq = rotaSeq;
+        ativo.addEventListener('blur', () => { setTimeout(() => { if (!redesenhoPendente || seq !== rotaSeq) return; redesenhoPendente = false; redesenharSeSeguro(); }, 300); }, { once: true });
+      }
+      return;
+    }
+    const hash = location.hash, y = window.scrollY;
+    const buscas = [...$main.querySelectorAll('input[type=search]')].map((i) => i.value);
+    manterRolagem = true;
+    Promise.resolve(rotear()).finally(() => {
+      manterRolagem = false;
+      if (location.hash !== hash) return;
+      $main.querySelectorAll('input[type=search]').forEach((i, k) => { if (buscas[k] && !i.value) { i.value = buscas[k]; i.dispatchEvent(new Event('input')); } });
+      window.scrollTo(0, y);
+    });
+  }
   App.aoReceberDados = async function () {
     await carregarConfig();
+    await repararConsistencia();
+    verificarPrazos();
     const r = location.hash;
-    if (!document.querySelector('.modal-fundo') && !/notificacao|editar|novo|config/.test(r)) rotear();
+    if (document.querySelector('.modal-fundo') || document.querySelector('.cv')) return; // não mexe na tela com janela ou câmera abertas
+    await redesenharSeSeguro();
   };
 
   /* ================================================================== */
@@ -210,11 +403,23 @@
     document.querySelectorAll('#nav a').forEach((a) => a.classList.toggle('ativo', a.dataset.r === r));
   }
 
+  /* Cada navegação recebe um número. Uma tela lenta que termina depois de o usuário ter ido para outra
+     não desenha por cima da nova (nem liga temporizadores): rcT lança RotaVelha e ela para ali. */
+  let rotaSeq = 0, manterRolagem = false;
+  function rcT(tk, ...k) {
+    if (tk !== rotaSeq) { const e = new Error('rota antiga'); e.rotaVelha = true; throw e; }
+    return rc($main, ...k);
+  }
   async function rotear() {
+    rotaSeq++;
+    redesenhoPendente = false;
+    App._atualizarTela = null;
+    if (App._sairTela) { const f = App._sairTela; App._sairTela = null; try { f(); } catch (e) { console.error(e); } }
     if (App._sairNotif) { const f = App._sairNotif; App._sairNotif = null; try { await f(); } catch (e) { console.error(e); } }
     const partes = (location.hash || '#/contratos').slice(2).split('/');
     const [r, a, b] = partes;
-    window.scrollTo(0, 0);
+    document.body.dataset.tela = r || 'contratos'; // o layout de computador muda conforme a tela
+    if (!manterRolagem) window.scrollTo(0, 0);
     document.querySelectorAll('.fab').forEach((f) => f.remove());
     if (Sync.habilitado() && !App.usuario() && r !== 'config') return telaLogin();
     if (Sync.habilitado() && Sync.estado === 'sem_acesso' && r !== 'config') return telaLogin(Sync.erro);
@@ -225,10 +430,15 @@
       if (r === 'novo') { return await telaFormRegistro(null, a); }
       if (r === 'notificacao') { return await telaNotificacao(a); }
       if (r === 'nova-notificacao') { return await criarNotificacao(a); }
-      if (r === 'coleta') { marcarNav('coleta'); return await telaColeta(a); }
+      if (r === 'coleta') { marcarNav(''); return await telaColeta(a); }
+      if (r === 'notificacoes') { marcarNav('notificacoes'); return await telaNotificacoes(); }
+      if (r === 'fila') { marcarNav('fila'); return await telaFila(); }
+      if (r === 'visita') { return await telaVisita(a); }
+      if (r === 'irregularidade') { return await telaIrregularidade(a, b); }
       if (r === 'config') { marcarNav('config'); return await telaConfig(a); }
       location.hash = '#/contratos';
     } catch (e) {
+      if (e && e.rotaVelha) return;
       console.error(e);
       rc($main, h('div', { class: 'card' }, h('h2', {}, 'Ocorreu um erro'), h('p', {}, e.message)));
     }
@@ -237,11 +447,12 @@
 
   function telaLogin(aviso) {
     App._login = !aviso;
-    titulo('Notificações');
+    document.body.dataset.tela = 'login';
+    titulo('Fiscalização de Obras');
     const alvo = h('div', { style: { display: 'flex', justifyContent: 'center', margin: '18px 0' } });
     rc($main, h('div', { class: 'card login-box' },
       h('div', { class: 'logo' }, '📋'),
-      h('h2', {}, 'Notificações Extrajudiciais'),
+      h('h2', {}, 'Fiscalização de Obras'),
       h('p', { class: 'sub' }, 'Entre com sua conta Google. Somente e-mails autorizados pelo administrador têm acesso.'),
       alvo,
       aviso ? h('p', { class: 'aviso' }, aviso) : null,
@@ -280,6 +491,32 @@
     return (await DB.byIndex('fotos', 'registroId', registroId)).filter((f) => !f.excluido)
       .sort((a, b) => String(b.dataHora).localeCompare(a.dataHora));
   }
+  /* ---------- Linha de lista (formato caixa de entrada) ---------- */
+  const COR_AVATAR = { ok: '#12b076', alerta: '#f59e0b', perigo: '#ef4462', info: '#4f8df7', neutro: '#9aa0bd', '': '#9aa0bd' };
+  const dataCurtaLocal = (v) => { const s = String(v || ''); if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return dataCurta(s); const d = new Date(s); return isNaN(d) ? '' : dataCurta(isoDe(d)); };
+  const dataCurta = (iso) => { const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(iso || '')); return m ? m[3] + '/' + m[2] + '/' + m[1].slice(2) : ''; };
+  // ícone de prédio (prefeitura), igual ao do menu Convênios
+  const icoPredio = () => { const d = document.createElement('span'); d.className = 'lin-ico'; d.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 21h18M5 21V10l7-5 7 5v11"/><path d="M10 21v-6h4v6"/></svg>'; return d; };
+  const linha2 = (o, cls) => h('div', { class: cls },
+    o.orgao ? h('span', { class: 'lin-org', title: o.orgao }, icoPredio(), h('span', { class: 'lin-org-t' }, o.orgao)) : null,
+    o.objeto ? h('span', { class: 'lin-obj', title: o.objeto }, '“' + o.objeto + '”') : null);
+  /** o: { href, de, titulo, pre, resumo, chips[], prazos[{rot, data, txt, cls}], objeto, pend, cls } */
+  function linhaLista(o) {
+    const corpo = [
+      h('div', { class: 'lin-de' }, o.de),
+      h('div', { class: 'lin-meio' },
+        h('div', { class: 'lin-l1' }, h('span', { class: 'lin-t' }, o.titulo, o.pend ? h('span', { class: 'pend', title: 'Aguardando sincronização' }) : null), o.resumo ? h('span', { class: 'lin-s' }, o.pre ? h('span', { class: 'so-cel' }, o.pre) : null, o.resumo) : null),
+        o.orgao || o.objeto ? linha2(o, o.orgao ? 'lin-l2 lin-l2-dentro' : 'lin-l2') : null,
+        o.chips && o.chips.filter(Boolean).length ? h('div', { class: 'etqs lin-chips' }, ...o.chips) : null),
+      // à direita: os prazos com o nome (ex.: Vigência do Convênio · 05/11/26 · faltam 35 dias)
+      h('div', { class: 'lin-dir' }, ...(o.prazos || []).map((z) => h('div', { class: 'lin-pz ' + (z.cls || '') },
+        h('span', { class: 'lin-pz-r' }, z.rot), h('b', { class: 'lin-pz-d' }, z.data), z.txt ? h('span', { class: 'lin-pz-t' }, z.txt) : null))),
+      // no celular a prefeitura usa a largura toda da linha (nomes longos não são cortados)
+      o.orgao ? linha2(o, 'lin-l2 lin-l2-fora') : null,
+    ];
+    return o.href ? h('a', { class: 'lin ' + (o.cls || ''), href: o.href }, ...corpo) : h('div', { class: 'lin ' + (o.cls || '') }, ...corpo);
+  }
+
   function descricaoRegistro(r) {
     const partes = [ROTULO[r.tipo] + ' nº ' + (r.numero || '—')];
     if (r.n_nome) partes.push(r.n_nome);
@@ -290,46 +527,79 @@
   /* Lista de contratos / convenios                                      */
   /* ================================================================== */
   async function telaLista(tipo) {
+    const tk = rotaSeq; // a tela desiste se o usuário já foi para outra
     titulo(PLURAL[tipo]);
     const regs = (await DB.listar('registros', (r) => r.tipo === tipo)).sort((a, b) => String(a.apelido || '').localeCompare(b.apelido || ''));
     const notifs = await DB.listar('notificacoes');
     const busca = h('input', { type: 'search', placeholder: 'Buscar por nome, número, empresa…' });
-    const lista = h('div');
+    const chaveFiltro = 'filtro_status_' + tipo;
+    const filtroSt = h('select', { onchange: () => { sessionStorage.setItem(chaveFiltro, filtroSt.value); desenhar(); } },
+      h('option', { value: '' }, 'Todos os status (' + regs.length + ')'),
+      listaStatus(tipo).map((x) => x.nome).concat([...new Set(regs.map((r) => r.status_obra).filter((st) => st && !listaStatus(tipo).some((x) => x.nome === st)))])
+        .map((st) => { const n = regs.filter((r) => r.status_obra === st).length; return n ? h('option', { value: st }, st + ' (' + n + ')') : null; }),
+      regs.some((r) => !r.status_obra) ? h('option', { value: '__sem' }, 'Sem status informado (' + regs.filter((r) => !r.status_obra).length + ')') : null);
+    filtroSt.value = sessionStorage.getItem(chaveFiltro) || '';
+    if (filtroSt.selectedIndex < 0) filtroSt.value = '';
+    const lista = h('div', { class: 'lista-obras lista-linhas' });
     const desenhar = () => {
       const q = busca.value.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
-      const filtrados = regs.filter((r) => !q || [r.apelido, r.numero, r.n_nome, r.objeto, r.processo].join(' ').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').includes(q));
+      const fs = filtroSt.value;
+      const filtrados = regs.filter((r) => (!fs || (fs === '__sem' ? !r.status_obra : r.status_obra === fs)) &&
+        (!q || [r.apelido, r.numero, r.n_nome, r.objeto, r.processo, r.status_obra].join(' ').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').includes(q)));
       rc(lista, ...(filtrados.length ? filtrados.map((r) => {
         const ns = notifs.filter((n) => n.registroId === r.id);
         const ult = ns.sort((a, b) => String(b.data).localeCompare(a.data))[0];
-        return h('a', { class: 'item', href: '#/registro/' + r.id },
-          h('div', { class: 't' }, r.apelido || '(sem nome)', r._pendente ? h('span', { class: 'pend', title: 'Aguardando sincronização' }) : null),
-          h('div', { class: 'd' }, descricaoRegistro(r)),
-          h('div', { class: 'd' }, ns.length ? ns.length + ' notificação(ões) · última em ' + X.dataBR(ult.data) : 'Nenhuma notificação no app'));
+        const aguard = ns.filter((n) => ['aguardando', 'vencida'].includes(situacaoNotif(n).k));
+        const venc = aguard.filter((n) => situacaoNotif(n).k === 'vencida').length;
+        const ps = prazosDoRegistro(r);
+        const st = infoStatus(r.status_obra, r.tipo);
+        return linhaLista({
+          href: '#/registro/' + r.id, cls: 'item', pend: r._pendente,
+          de: h('span', { class: 'lin-st' }, h('span', { class: 'lin-dot', style: { background: COR_AVATAR[st ? st.cor : 'neutro'] } }), h('span', { class: 'lin-st-t' }, r.status_obra || 'Sem status')),
+          titulo: r.apelido || '(sem nome)',
+          // convênio: a prefeitura vai numa linha própria (sempre visível); contrato: empresa no resumo
+          orgao: r.tipo === 'convenio' ? String(r.n_nome || '').trim() : '',
+          resumo: (r.tipo === 'convenio' ? ROTULO[r.tipo] + ' nº ' + (r.numero || '—') : descricaoRegistro(r)) + ' · ' + (ns.length ? ns.length + ' notificação(ões), última em ' + X.dataBR(ult.data) : 'nenhuma notificação no app'),
+          pre: h('span', { class: 'lin-pre ' + ((st && st.cor) || '') }, (r.status_obra || 'Sem status') + ' · '),
+          prazos: ps.map((p) => ({ rot: p.rot, data: dataCurta(p.data), txt: p.info.txt, cls: p.info.cls })),
+          objeto: String(r.objeto || '').trim(),
+          chips: [venc ? etq('⏰ ' + venc + ' notificação(ões) com prazo encerrado', 'perigo') : aguard.length ? etq(aguard.length + ' notificação(ões) aguardando resposta', 'info') : null],
+        });
       }) : [h('div', { class: 'vazio' }, regs.length ? 'Nada encontrado.' : 'Nenhum ' + ROTULO[tipo].toLowerCase() + ' cadastrado ainda.',
         pode.cadastro() && !regs.length ? h('div', { style: { marginTop: '12px' } }, h('a', { class: 'btn pri', href: '#/novo/' + tipo }, '+ Cadastrar ' + ROTULO[tipo].toLowerCase())) : null)]));
     };
     busca.addEventListener('input', desenhar);
     desenhar();
-    rc($main, h('div', { style: { marginBottom: '10px' } }, busca), lista);
+    rcT(tk, h('div', { class: 'linha-busca' }, busca, filtroSt), lista);
     if (pode.cadastro() && location.hash.indexOf(tipo === 'convenio' ? 'convenios' : 'contratos') >= 0 || (pode.cadastro() && tipo === 'contrato' && !location.hash)) document.body.appendChild(h('button', { class: 'fab', title: 'Novo', onclick: () => { location.hash = '#/novo/' + tipo; } }, '+'));
   }
 
   /* ================================================================== */
   /* Detalhe do registro                                                 */
   /* ================================================================== */
+  async function visitasDe(registroId) {
+    return (await DB.byIndex('visitas', 'registroId', registroId)).filter((v) => !v.excluido)
+      .sort((a, b) => (b.numero || 0) - (a.numero || 0));
+  }
+
   async function telaRegistro(id) {
+    const tk = rotaSeq; // a tela desiste se o usuário já foi para outra
     const r = await DB.get('registros', id);
-    if (!r || r.excluido) { rc($main, h('div', { class: 'vazio' }, 'Cadastro não encontrado.')); return; }
+    if (!r || r.excluido) { rcT(tk, h('div', { class: 'vazio' }, 'Cadastro não encontrado.')); return; }
     titulo(r.apelido || ROTULO[r.tipo], true);
     marcarNav(r.tipo === 'convenio' ? 'convenios' : 'contratos');
     const notifs = await notificacoesDe(id);
     const fotos = await fotosDe(id);
-    const aba = sessionStorage.getItem('aba_reg') || 'notif';
+    const visitas = await visitasDe(id);
+    const aba = sessionStorage.getItem('aba_reg2') || 'visitas';
 
     const info = h('table', { class: 'tabela-info' },
       [['Notificada', r.n_nome], [ROTULO[r.tipo] + ' nº', r.numero], ['Processo', r.processo],
+        ['Local da obra', r.local_obra],
+        ['Status', r.status_obra ? etqStatus(r) : ''],
+        ...prazosDoRegistro(r).map((p) => [p.rot === 'Execução' ? 'Prazo de execução' : p.rot, h('span', {}, X.dataBR(p.data) + ' ', etq(p.info.txt, p.info.cls))]),
         ['Valor', r.valor ? 'R$ ' + X.formatarMoeda(X.parseMoeda(r.valor)) : ''],
-        r.tipo === 'convenio' ? ['Vigência', X.dataBR(r.vigencia)] : ['O.S. nº', r.os_numero],
+        r.tipo === 'contrato' ? ['O.S. nº', r.os_numero] : ['', ''],
         ['Sanções', r.sancoes && r.sancoes.trim() ? 'Personalizadas' : 'Padrão do modelo']]
         .filter((x) => x[1]).map(([k, v]) => h('tr', {}, h('td', {}, k), h('td', {}, v))));
 
@@ -339,20 +609,37 @@
       r.objeto ? h('p', { class: 'sub', style: { marginTop: 0 } }, '“' + r.objeto + '”') : null,
       info,
       h('div', { class: 'acoes' },
-        pode.notificar() ? h('a', { class: 'btn pri', href: '#/nova-notificacao/' + id }, '+ Nova notificação') : null,
-        pode.coletar() ? h('a', { class: 'btn', href: '#/coleta/' + id }, '📷 Coletar fotos') : null,
+        pode.coletar() ? h('a', { class: 'btn pri', href: '#/coleta/' + id }, '📷 Visita / fotos') : null,
+        pode.notificar() ? h('a', { class: 'btn', href: '#/nova-notificacao/' + id }, '+ Nova notificação') : null,
         pode.cadastro() ? h('a', { class: 'btn', href: '#/editar/' + id }, '✏️ Editar cadastro') : null));
 
     const conteudo = h('div');
+    const aba2 = (k, t) => h('button', { class: aba === k ? 'ativo' : '', onclick: () => { sessionStorage.setItem('aba_reg2', k); telaRegistro(id); } }, t);
     const abas = h('div', { class: 'abas' },
-      h('button', { class: aba === 'notif' ? 'ativo' : '', onclick: () => { sessionStorage.setItem('aba_reg', 'notif'); telaRegistro(id); } }, 'Histórico (' + notifs.length + ')'),
-      h('button', { class: aba === 'fotos' ? 'ativo' : '', onclick: () => { sessionStorage.setItem('aba_reg', 'fotos'); telaRegistro(id); } }, 'Fotos (' + fotos.length + ')'));
+      aba2('visitas', 'Visitas (' + visitas.length + ')'),
+      aba2('notif', 'Notificações (' + notifs.length + ')'),
+      aba2('irr', 'Irregularidades (' + fotos.filter((f) => f.irregular && situacao(f) === 'pendente').length + ')'),
+      aba2('fotos', 'Fotos (' + fotos.length + ')'));
 
-    if (aba === 'notif') {
+    if (aba === 'visitas') {
+      ap(conteudo, ...(visitas.length ? visitas.map((v) => {
+        const fv = fotos.filter((f) => f.visitaId === v.id);
+        const irr = fv.filter((f) => f.irregular).length;
+        return h('a', { class: 'item', href: '#/visita/' + v.id },
+          h('span', { class: 'badge ' + (v.status === 'concluida' ? 'emit' : 'rasc') }, v.status === 'concluida' ? 'Concluída' : 'Em andamento'),
+          h('div', { class: 't' }, 'Visita nº ' + v.numero + ' · ' + X.dataBR(v.data), v._pendente ? h('span', { class: 'pend' }) : null),
+          h('div', { class: 'd' }, [v.hora_inicio, v.hora_fim].filter(Boolean).join(' – ') + (v.hora_inicio ? ' · ' : '') + fv.length + ' foto(s)' + (irr ? ' · ⚠️ ' + irr + ' irregularidade(s)' : '')),
+          h('div', { class: 'd' }, 'Por ' + (v.criadoPor || '—')));
+      }) : [h('div', { class: 'vazio' }, 'Nenhuma visita registrada.',
+        pode.coletar() ? h('div', { style: { marginTop: '12px' } }, h('a', { class: 'btn pri', href: '#/coleta/' + id }, '▶ Iniciar visita')) : null)]));
+    } else if (aba === 'irr') {
+      ap(conteudo, await painelIrregularidades(r));
+    } else if (aba === 'notif') {
       ap(conteudo, ...(notifs.length ? notifs.map((n) => h('a', { class: 'item', href: '#/notificacao/' + n.id },
         h('span', { class: 'badge ' + (n.status === 'emitida' ? 'emit' : 'rasc') }, n.status === 'emitida' ? 'Emitida' : 'Rascunho'),
         h('div', { class: 't' }, (n.ordinal || '?') + 'ª Notificação', n._pendente ? h('span', { class: 'pend' }) : null),
-        h('div', { class: 'd' }, 'Nº ' + (n.numero || '—') + ' · ' + X.dataBR(n.data)),
+        h('div', { class: 'd' }, 'Nº ' + (n.numero || (n.status === 'emitida' ? '—' : 'a definir na emissão')) + ' · ' + X.dataBR(n.data)),
+        n.status === 'emitida' ? h('div', { class: 'etqs' }, etq(situacaoNotif(n).txt, situacaoNotif(n).cls), n.enviadaEm && !n.respondidaEm ? etq('prazo até ' + X.dataBR(prazoDe(n)), '') : null) : null,
         h('div', { class: 'd' }, (n.itens && n.itens.length ? n.itens.length + ' item(ns) · ' : '') + ((n.fotos || []).length) + ' foto(s) · por ' + (n.criadoPor || '—'))))
         : [h('div', { class: 'vazio' }, 'Nenhuma notificação registrada no app para este ' + ROTULO[r.tipo].toLowerCase() + '.',
           r.ultima_notif_anterior ? h('div', { class: 'sub' }, 'Notificações emitidas antes do app: ' + r.ultima_notif_anterior) : null)]));
@@ -360,19 +647,21 @@
       ap(conteudo, gradeFotos(fotos, { onclick: (f) => abrirFoto(f, () => telaRegistro(id)) }));
       if (!fotos.length) ap(conteudo, h('div', { class: 'vazio' }, 'Nenhuma foto coletada.'));
     }
-    rc($main, cab, abas, conteudo);
+    rcT(tk, cab, r.tipo === 'convenio' ? cartaoFilaConvenio(r) : null, abas, conteudo);
   }
 
   /* ---------------- fotos ---------------- */
   const cacheUrls = new Map();
   async function urlFoto(f, grande) {
     if (!grande && f.miniatura) return f.miniatura;
-    if (cacheUrls.has(f.id)) return cacheUrls.get(f.id);
+    if (cacheUrls.has(f.id)) { const u = cacheUrls.get(f.id); cacheUrls.delete(f.id); cacheUrls.set(f.id, u); return u; }
     let blob = await DB.blobGet(f.id);
     if (!blob && grande && Sync.habilitado() && navigator.onLine) { try { blob = await Sync.baixarFoto(f); } catch (e) { /* */ } }
     if (!blob) return f.miniatura || '';
     const u = URL.createObjectURL(blob);
     cacheUrls.set(f.id, u);
+    // guarda só as 30 últimas fotos grandes abertas (antes ficavam todas na memória até fechar o app)
+    while (cacheUrls.size > 30) { const [k, v] = cacheUrls.entries().next().value; cacheUrls.delete(k); setTimeout(() => URL.revokeObjectURL(v), 60000); }
     return u;
   }
 
@@ -383,40 +672,223 @@
       const img = h('img', { alt: f.descricao || '', loading: 'lazy' });
       urlFoto(f).then((u) => { img.src = u; });
       const idx = opts.selecionadas ? opts.selecionadas.indexOf(f.id) : -1;
-      ap(g, h('div', { class: 'foto' + (idx >= 0 ? ' sel' : ''), onclick: () => opts.onclick && opts.onclick(f) },
+      ap(g, h('div', { class: 'foto' + (idx >= 0 ? ' sel' : '') + (f.irregular ? ' irr' : '') + (f.fora_relatorio && opts.marcarRelatorio ? ' fora' : ''), onclick: () => opts.onclick && opts.onclick(f) },
         img,
         idx >= 0 ? h('span', { class: 'num' }, idx + 1) : null,
+        f.irregular ? h('span', { class: 'alerta', title: 'Irregularidade' }, '⚠️') : null,
         !f.driveId && Sync.habilitado() ? h('span', { class: 'nuvem', title: 'Ainda não enviada' }, '⏳') : null,
         h('div', { class: 'dt' }, dataHoraBR(f.dataHora))));
     }
     return g;
   }
 
+  /* ---------------- gravação sem apagar alterações de outros aparelhos ---------------- */
+  const CAMPOS_SISTEMA = ['id', '_pendente', '_campos', '_base', 'atualizadoEm', 'atualizadoPor', 'criadoEm', 'criadoPor'];
+  const clonar = (o) => (o === undefined ? undefined : JSON.parse(JSON.stringify(o)));
+  /* Grava só os campos que o usuário mudou na tela (base = cópia de quando a tela abriu),
+     aplicando-os sobre a versão mais recente guardada no aparelho (que pode ter chegado de outro celular). */
+  async function salvarMudancas(store, base, editado) {
+    if (!editado.id || !(await DB.get(store, editado.id))) return DB.salvar(store, editado, email());
+    const chaves = new Set([...Object.keys(base || {}), ...Object.keys(editado)]);
+    return atualizarCampos(store, editado.id, (atual) => {
+      for (const k of chaves) {
+        if (CAMPOS_SISTEMA.includes(k)) continue;
+        if (JSON.stringify((base || {})[k]) === JSON.stringify(editado[k])) continue;
+        if (editado[k] === undefined) delete atual[k]; else atual[k] = clonar(editado[k]);
+      }
+    });
+  }
+  /* Lê a versão mais recente, altera e grava. */
+  async function atualizarCampos(store, id, fn) {
+    // leitura e gravação na mesma transação: uma sincronização no meio não é sobrescrita (fn não pode usar await)
+    const quem = email();
+    const r = await DB.atualizar(store, id, (o) => {
+      if (!o) return undefined;
+      const antes = JSON.parse(JSON.stringify(o));
+      fn(o);
+      o.atualizadoEm = DB.carimbo(o.atualizadoEm);
+      o.atualizadoPor = quem;
+      DB.marcarCampos(antes, o, o.atualizadoEm);
+      o._pendente = true;
+      return o;
+    });
+    if (!r) return null;
+    if (App.agendarSync) App.agendarSync();
+    return r;
+  }
+  async function salvarConfig(fn) {
+    // já existe: lê e grava na mesma transação (uma sincronização no meio não é desfeita)
+    if (await DB.get('config', 'geral')) { await atualizarCampos('config', 'geral', (o) => { fn(o); }); return carregarConfig(); }
+    let o = null;
+    if (!o) {
+      // aparelho novo que ainda não recebeu os ajustes da equipe: gravar agora apagaria os ajustes de todos
+      if (Sync.habilitado() && !(await DB.kvGet('ultimaSync', null))) throw new Error('Aguarde a primeira sincronização deste aparelho: os ajustes da equipe ainda não chegaram.');
+      o = clonar(CONFIG);
+    }
+    await fn(o);
+    await DB.salvar('config', o, email());
+    return carregarConfig();
+  }
+
+  /* ---------------- exclusão de fotos (junto com o histórico das irregularidades) ---------------- */
+  function recalcularSituacao(f) {
+    const vs = f.verificacoes || [];
+    const ult = vs[vs.length - 1];
+    if (ult && ult.status === 'sanada') { f.situacao = 'sanada'; f.sanadaEm = ult.data; }
+    else { f.situacao = 'pendente'; delete f.sanadaEm; }
+  }
+  /* Calcula tudo o que sai junto: fotos de verificação de uma irregularidade excluída,
+     verificações que perdem a foto (ou a visita), rascunhos que usam as fotos. */
+  async function planoExclusao(ids, visitaId) {
+    const todas = new Map((await DB.all('fotos')).map((f) => [f.id, f]));
+    const excluir = new Set();
+    const iniciais = new Set();
+    const add = (id, inicial) => {
+      const f = todas.get(id);
+      if (!f || f.excluido || excluir.has(id)) return;
+      excluir.add(id);
+      if (inicial) iniciais.add(id);
+      if (f.irregular) {
+        for (const vf of f.verificacoes || []) if (vf.fotoId) add(vf.fotoId);
+        for (const o of todas.values()) if (o.verificacaoDe === id) add(o.id);
+      }
+    };
+    ids.forEach((id) => add(id, true));
+    const removerVerif = (vf) => (vf.fotoId && excluir.has(vf.fotoId)) || (visitaId && vf.visitaId === visitaId);
+    const ajustar = [];
+    for (const f of todas.values()) {
+      if (f.excluido || excluir.has(f.id) || !f.irregular || !(f.verificacoes || []).length) continue;
+      const restantes = f.verificacoes.filter((vf) => !removerVerif(vf));
+      if (restantes.length !== f.verificacoes.length) {
+        const depois = { verificacoes: restantes }; recalcularSituacao(depois);
+        ajustar.push({ f, removidas: f.verificacoes.length - restantes.length, voltaPendente: situacao(f) === 'sanada' && depois.situacao !== 'sanada' });
+      }
+    }
+    const notifs = (await DB.listar('notificacoes')).filter((n) => (n.fotos || []).some((s) => excluir.has(s.fotoId)));
+    return { todas, excluir, iniciais, removerVerif, ajustar, rascunhos: notifs.filter((n) => n.status !== 'emitida'), emitidas: notifs.filter((n) => n.status === 'emitida') };
+  }
+  async function executarExclusao(plano) {
+    for (const id of plano.excluir) await atualizarCampos('fotos', id, (o) => { o.excluido = true; });
+    for (const { f } of plano.ajustar) {
+      await atualizarCampos('fotos', f.id, (o) => { o.verificacoes = (o.verificacoes || []).filter((vf) => !plano.removerVerif(vf)); recalcularSituacao(o); });
+    }
+    for (const n of plano.rascunhos) await atualizarCampos('notificacoes', n.id, (o) => { o.fotos = (o.fotos || []).filter((s) => !plano.excluir.has(s.fotoId)); });
+  }
+  /* Exclui com confirmação, explicando o que mais sai junto. Retorna true se excluiu. */
+  async function excluirFotos(ids, texto, visitaId) {
+    const plano = await planoExclusao(ids, visitaId);
+    if (plano.emitidas.length) {
+      await modal('Não é possível excluir', h('p', {}, 'Há foto(s) anexada(s) a notificação já emitida (' +
+        plano.emitidas.map((n) => (n.ordinal || '?') + 'ª — nº ' + (n.numero || '—')).join('; ') +
+        '). Para preservar o documento emitido, ela(s) não pode(m) ser excluída(s). Se for mesmo necessário, um administrador pode reabrir a notificação e retirar a foto.'));
+      return false;
+    }
+    const linhas = [];
+    const extras = [...plano.excluir].filter((id) => !plano.iniciais.has(id)).length;
+    if (extras) linhas.push('Também será(ão) excluída(s) ' + extras + ' foto(s) do histórico de verificações da irregularidade.');
+    for (const a of plano.ajustar) linhas.push('A irregularidade “' + (a.f.descricao || 'sem descrição') + '” perde ' + a.removidas + ' registro(s) do histórico' + (a.voltaPendente ? ' e volta a ficar PENDENTE.' : '.'));
+    if (plano.rascunhos.length) linhas.push('A(s) foto(s) será(ão) retirada(s) de ' + plano.rascunhos.length + ' rascunho(s) de notificação.');
+    if (Sync.habilitado() && plano.excluir.size) linhas.push('No Google Drive, a(s) foto(s) vai(ão) para a lixeira (o dono da pasta pode recuperar em até 30 dias).');
+    const ok = await modal('Confirmar exclusão', h('div', {}, h('p', {}, texto), linhas.map((l) => h('p', { class: 'sub' }, '• ' + l))),
+      [{ txt: 'Cancelar', valor: false }, { txt: 'Excluir', cls: 'perigo', valor: true }]);
+    if (!ok) return false;
+    await executarExclusao(plano);
+    return true;
+  }
+
+  /* Corrige dados antigos ou que chegaram fora de ordem de outros aparelhos:
+     histórico apontando para foto/visita excluída, fotos de verificação órfãs, rascunhos com fotos excluídas. */
+  let reparando = false;
+  async function repararConsistencia() {
+    if (reparando || !pode.coletar()) return 0;
+    reparando = true;
+    let n = 0;
+    try {
+      const fotos = await DB.all('fotos');
+      const mapa = new Map(fotos.map((f) => [f.id, f]));
+      const visitas = new Map((await DB.all('visitas')).map((v) => [v.id, v]));
+      const valida = (vf) => {
+        const fv = vf.fotoId ? mapa.get(vf.fotoId) : null;
+        if (fv && fv.excluido) return false;
+        const vis = vf.visitaId ? visitas.get(vf.visitaId) : null;
+        return !(vis && vis.excluido);
+      };
+      for (const f of fotos) {
+        if (f.excluido) continue;
+        if (f.verificacaoDe) {
+          const irr = mapa.get(f.verificacaoDe);
+          if (irr && (irr.excluido || !irr.irregular)) {
+            await atualizarCampos('fotos', f.id, (o) => { if (irr.excluido) o.excluido = true; else delete o.verificacaoDe; });
+            n++; continue;
+          }
+        }
+        if (f.irregular && (f.verificacoes || []).length && !f.verificacoes.every(valida)) {
+          await atualizarCampos('fotos', f.id, (o) => { o.verificacoes = (o.verificacoes || []).filter(valida); recalcularSituacao(o); });
+          n++;
+        }
+      }
+      for (const nt of await DB.listar('notificacoes')) {
+        if (nt.status === 'emitida') continue;
+        if ((nt.fotos || []).some((s) => (mapa.get(s.fotoId) || {}).excluido)) {
+          await atualizarCampos('notificacoes', nt.id, (o) => { o.fotos = (o.fotos || []).filter((s) => !(mapa.get(s.fotoId) || {}).excluido); });
+          n++;
+        }
+      }
+    } catch (e) { console.warn('reparo', e); } finally { reparando = false; }
+    return n;
+  }
+
   async function abrirFoto(f, depois) {
+    f = (await DB.get('fotos', f.id)) || f;
     const img = h('img', { class: 'grande' });
     urlFoto(f, true).then((u) => { img.src = u; });
-    const edit = { descricao: f.descricao || '' };
+    const edit = { descricao: f.descricao || '', irregular: !!f.irregular, incluir: !f.fora_relatorio };
     const coord = f.lat != null ? h('a', { href: 'https://www.google.com/maps?q=' + f.lat + ',' + f.lng, target: '_blank', rel: 'noopener' }, Foto.textoCoord(f.lat, f.lng) + (f.precisao ? ' (±' + f.precisao + ' m)' : '')) : 'sem coordenadas';
     const podeEditar = pode.coletar();
+    const irrDe = f.verificacaoDe ? await DB.get('fotos', f.verificacaoDe) : null;
+    const nVer = (f.verificacoes || []).length;
+    const rotDesc = h('span', {}, edit.irregular ? 'Descrição da irregularidade *' : 'Legenda (opcional)');
+    const area = inputArea(edit, 'descricao', { readonly: !podeEditar, placeholder: 'Ex.: Telhas do refeitório amassadas' });
+    const chkIrr = h('input', { type: 'checkbox', disabled: !podeEditar, checked: edit.irregular ? 'checked' : null,
+      onchange: (e) => { edit.irregular = e.target.checked; rotDesc.textContent = edit.irregular ? 'Descrição da irregularidade *' : 'Legenda (opcional)'; } });
+    const chkRel = h('input', { type: 'checkbox', disabled: !podeEditar, checked: edit.incluir ? 'checked' : null, onchange: (e) => { edit.incluir = e.target.checked; } });
     const corpo = h('div', {}, img,
       h('div', { class: 'sub' }, '🕒 ', dataHoraBR(f.dataHora), ' · 📍 ', coord),
       h('div', { class: 'sub', style: { marginBottom: '10px' } }, 'Por ', f.criadoPor || '—', f.origem === 'galeria' ? ' · importada da galeria' : ''),
-      campo('Descrição do problema', inputArea(edit, 'descricao', { readonly: !podeEditar, placeholder: 'Ex.: Telhas do refeitório amassadas' })));
+      irrDe && !irrDe.excluido ? h('div', { class: 'aviso', style: { marginBottom: '8px' } }, '📋 Foto do histórico da irregularidade “' + (irrDe.descricao || '') + '”. ',
+        h('a', { href: '#/irregularidade/' + irrDe.id, onclick: () => { const m = document.querySelector('.modal-fundo'); if (m) m.remove(); } }, 'Ver histórico'))
+        : h('label', { class: 'linha', style: { marginBottom: '8px' } }, chkIrr, h('b', {}, '⚠️ Registrar como irregularidade')),
+      nVer ? h('div', { class: 'sub', style: { marginBottom: '8px' } }, 'Histórico: ' + nVer + ' verificação(ões) — ', h('a', { href: '#/irregularidade/' + f.id, onclick: () => { const m = document.querySelector('.modal-fundo'); if (m) m.remove(); } }, 'abrir')) : null,
+      h('label', { class: 'campo' }, rotDesc, area),
+      h('label', { class: 'linha sub' }, chkRel, 'Incluir no relatório fotográfico'));
     const botoes = [{ txt: 'Fechar', valor: 'fechar' }];
     if (podeEditar) {
       botoes.unshift({ txt: 'Excluir', cls: 'perigo', valor: 'excluir' });
-      botoes.push({ txt: 'Salvar', cls: 'pri', valor: 'salvar' });
+      botoes.push({ txt: 'Salvar', cls: 'pri', valor: 'salvar', antes: () => {
+        if (edit.irregular && !edit.descricao.trim()) { toast('Descreva a irregularidade.', true); return false; }
+      } });
     }
     const r = await modal(null, corpo, botoes);
     if (r === 'salvar') {
-      f.descricao = edit.descricao;
-      await DB.salvar('fotos', f, email());
-      toast('Foto atualizada');
-    } else if (r === 'excluir') {
-      if (await confirmar('Excluir esta foto? Ela não aparecerá mais para ninguém do grupo.', 'Excluir', true)) {
-        await DB.excluir('fotos', f.id, email());
-        toast('Foto excluída');
+      let seguir = true;
+      if (f.irregular && !edit.irregular && nVer) {
+        seguir = await confirmar('Esta irregularidade tem ' + nVer + ' registro(s) no histórico de verificações. Ao deixar de ser irregularidade, esse histórico é apagado (as fotos de verificação continuam como fotos comuns da visita). Continuar?', 'Continuar', true);
+        if (seguir) for (const vf of f.verificacoes) if (vf.fotoId) await atualizarCampos('fotos', vf.fotoId, (o) => { delete o.verificacaoDe; });
       }
+      if (seguir) {
+        await atualizarCampos('fotos', f.id, (o) => {
+          o.descricao = edit.descricao.trim();
+          o.irregular = edit.irregular;
+          o.fora_relatorio = !edit.incluir;
+          if (!o.irregular) { delete o.verificacoes; delete o.situacao; delete o.sanadaEm; }
+        });
+        toast('Foto atualizada');
+      }
+    } else if (r === 'excluir') {
+      const txt = f.irregular ? 'Excluir esta irregularidade (foto e descrição)? Ela não aparecerá mais para ninguém do grupo.'
+        : irrDe ? 'Excluir esta foto? O registro de verificação ligado a ela será retirado do histórico da irregularidade.'
+          : 'Excluir esta foto? Ela não aparecerá mais para ninguém do grupo.';
+      if (await excluirFotos([f.id], txt)) toast('Foto excluída');
     }
     if (depois) depois();
   }
@@ -459,8 +931,10 @@
   }
 
   async function telaFormRegistro(id, tipoNovo) {
+    const tk = rotaSeq; // a tela desiste se o usuário já foi para outra
     if (!pode.cadastro()) { toast('Apenas administradores editam cadastros.', true); history.back(); return; }
     const existente = id ? await DB.get('registros', id) : null;
+    const baseReg = existente ? clonar(existente) : null;
     const r = existente ? JSON.parse(JSON.stringify(existente)) : {
       tipo: tipoNovo === 'convenio' ? 'convenio' : 'contrato',
       fiscais: null, coordenadores: null, prazo_dias: CONFIG.prazo_padrao,
@@ -470,7 +944,7 @@
     if (!r.coordenadores) r.coordenadores = (CONFIG.coordenadores_padrao || []).slice();
     const coords = r.coordenadores.map((pid) => ({ pessoaId: pid }));
     const pessoas = await pessoasMap();
-    titulo((existente ? 'Editar ' : 'Novo ') + ROTULO[tipo].toLowerCase(), true);
+    titulo((existente ? 'Editar ' : 'Novo ') + ROTULO[tipo].toLowerCase(), true); marcarNav(tipo === 'convenio' ? 'convenios' : 'contratos');
 
     const valorInp = (chave, chaveExt) => {
       const inpExt = inputTxt(r, chaveExt, { placeholder: 'gerado automaticamente' });
@@ -496,15 +970,25 @@
         campo('CEP', inputTxt(r, 'n_cep', { inputmode: 'numeric' }))),
       campo('Município/UF', inputTxt(r, 'n_municipio', { placeholder: 'Ex.: Sinop/MT' })));
 
+    const selStatus = h('select', { onchange: (e) => { r.status_obra = e.target.value; } },
+      h('option', { value: '' }, '— não informado —'),
+      listaStatus(tipo).map((x) => h('option', { value: x.nome, selected: r.status_obra === x.nome ? 'selected' : null }, x.nome)),
+      r.status_obra && !listaStatus(tipo).some((x) => x.nome === r.status_obra) ? h('option', { value: r.status_obra, selected: 'selected' }, r.status_obra + ' (fora da lista atual)') : null);
     const secDados = h('div', { class: 'card' }, h('h2', {}, 'Dados do ' + ROTULO[tipo].toLowerCase()),
+      campo('Status da obra', selStatus),
       campo('Nome curto (identificação no app e no nome do arquivo) *', inputTxt(r, 'apelido', { placeholder: tipo === 'convenio' ? 'Ex.: CONVÊNIO 0961-2024 - CLÁUDIA' : 'Ex.: CEI DAURY RIVA' })),
       campo('Objeto', inputArea(r, 'objeto', { placeholder: 'Sem aspas — o modelo já inclui' })),
+      campo('Local da obra (endereço / município)', inputTxt(r, 'local_obra', { placeholder: 'Ex.: Bairro Dauri Riva, Sinop/MT' }), 'Aparece no relatório fotográfico.'),
       h('div', { class: 'grade2' },
         campo(ROTULO[tipo] + ' nº', inputTxt(r, 'numero')),
         campo('Processo/Protocolo nº', inputTxt(r, 'processo'))),
       campo('Valor do ' + ROTULO[tipo].toLowerCase() + ' (R$)', vInp),
       campo('Valor por extenso', vExt, 'Deixe vazio para gerar automaticamente.'),
-      tipo === 'convenio' ? campo('Prazo de vigência', h('input', { type: 'date', value: r.vigencia || '', oninput: (e) => { r.vigencia = e.target.value; } })) : null,
+      tipo === 'contrato' ? h('div', { class: 'grade2' },
+        campo('Prazo de execução (data final)', h('input', { type: 'date', value: r.prazo_execucao || '', oninput: (e) => { r.prazo_execucao = e.target.value; } })),
+        campo('Prazo de vigência (data final)', h('input', { type: 'date', value: r.vigencia || '', oninput: (e) => { r.vigencia = e.target.value; } })))
+        : campo('Prazo de vigência (data final)', h('input', { type: 'date', value: r.vigencia || '', oninput: (e) => { r.vigencia = e.target.value; } })),
+      h('div', { class: 'dica' }, 'O app mostra na lista quantos dias faltam para cada prazo.'),
       tipo === 'contrato' ? (() => {
         const [oInp, oExt] = valorInp('valor_os', 'valor_os_extenso');
         return h('div', {}, h('h3', {}, 'Ordem de Serviço (opcional)'),
@@ -546,7 +1030,7 @@
       r.coordenadores = coords.map((c) => c.pessoaId).filter(Boolean);
       r.fiscais = r.fiscais.filter((f) => f.pessoaId);
       if (!r.n_nome_texto) r.n_nome_texto = '';
-      const salvo = await DB.salvar('registros', Object.assign(existente || {}, r), email());
+      const salvo = existente ? await salvarMudancas('registros', baseReg, r) : await DB.salvar('registros', r, email());
       toast('Cadastro salvo');
       location.replace('#/registro/' + salvo.id);
     };
@@ -559,114 +1043,700 @@
           location.replace('#/' + (tipo === 'convenio' ? 'convenios' : 'contratos'));
         }
       } }, 'Excluir') : null));
-    rc($main, secDados, secNotificada, secAss, secSanc, secPad, acoes);
+    rcT(tk, secDados, secNotificada, secAss, secSanc, secPad, acoes);
   }
 
   /* ================================================================== */
   /* Coleta de fotos em campo (offline)                                  */
   /* ================================================================== */
+  /* ================================================================== */
+  /* Visitas (coleta em campo e relatorio fotografico)                   */
+  /* ================================================================== */
+  const horaAgora = () => { const d = new Date(); return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0'); };
+  const CLIMAS = ['', 'Ensolarado', 'Parcialmente nublado', 'Nublado', 'Chuvoso', 'Chuva forte', 'Após chuva (solo úmido)'];
+
   async function telaColeta(registroId) {
+    const tk = rotaSeq; // a tela desiste se o usuário já foi para outra
     if (!registroId) {
-      titulo('Coleta em campo');
+      titulo('Visita à obra');
       const regs = (await DB.listar('registros')).sort((a, b) => String(a.apelido).localeCompare(b.apelido));
       const recentes = (await DB.kvGet('coletaRecentes', [])).map((id) => regs.find((r) => r.id === id)).filter(Boolean);
+      const andamento = (await DB.listar('visitas', (v) => v.status !== 'concluida' && v.criadoPor === email()));
       const bloco = (lista) => lista.map((r) => h('a', { class: 'item', href: '#/coleta/' + r.id },
         h('span', { class: 'badge' }, ROTULO[r.tipo]), h('div', { class: 't' }, r.apelido), h('div', { class: 'd' }, descricaoRegistro(r))));
-      rc($main, 
-        h('p', { class: 'sub' }, 'Escolha a obra para registrar fotos. Funciona sem internet: as fotos ficam no aparelho e são enviadas quando houver conexão.'),
-        recentes.length ? h('h3', { class: 'sub' }, 'Usados recentemente') : null, bloco(recentes),
-        h('h3', { class: 'sub' }, 'Todos'), regs.length ? bloco(regs) : h('div', { class: 'vazio' }, 'Nenhum contrato ou convênio cadastrado.'));
+      rcT(tk,
+        andamento.length ? h('h3', { class: 'sub' }, 'Suas visitas em andamento') : null,
+        andamento.map((v) => { const r = regs.find((x) => x.id === v.registroId); return r ? h('a', { class: 'item', href: '#/visita/' + v.id },
+          h('span', { class: 'badge rasc' }, 'Em andamento'), h('div', { class: 't' }, r.apelido), h('div', { class: 'd' }, 'Visita nº ' + v.numero + ' · ' + X.dataBR(v.data))) : null; }),
+        h('p', { class: 'sub' }, 'Escolha a obra para iniciar uma visita. Funciona sem internet: as fotos ficam no aparelho e são enviadas quando houver conexão.'),
+        recentes.length ? h('h3', { class: 'sub' }, 'Usadas recentemente') : null, bloco(recentes),
+        h('h3', { class: 'sub' }, 'Todas as obras'), regs.length ? bloco(regs) : h('div', { class: 'vazio' }, 'Nenhum contrato ou convênio cadastrado.'));
       return;
     }
     const r = await DB.get('registros', registroId);
     if (!r) { location.replace('#/coleta'); return; }
-    titulo('Coleta · ' + r.apelido, true);
+    if (!pode.coletar()) { rcT(tk, h('div', { class: 'aviso' }, 'Seu perfil permite apenas consulta.')); return; }
     const rec = (await DB.kvGet('coletaRecentes', [])).filter((x) => x !== registroId);
     rec.unshift(registroId);
     DB.kvSet('coletaRecentes', rec.slice(0, 5));
+    const abertas = (await visitasDe(registroId)).filter((v) => v.status !== 'concluida');
+    if (tk !== rotaSeq) return; // saiu da tela enquanto carregava
+    if (abertas.length) {
+      const v = abertas[0];
+      const esc = await modal('Visita em andamento', h('p', {}, 'Há uma visita em andamento nesta obra (nº ' + v.numero + ', ' + X.dataBR(v.data) + '). Deseja continuar nela?'),
+        [{ txt: 'Nova visita', valor: 'nova' }, { txt: 'Continuar', cls: 'pri', valor: 'continuar' }]);
+      if (esc === 'continuar') { location.replace('#/visita/' + v.id); return; }
+      if (esc !== 'nova') { history.back(); return; }
+    }
+    await criarVisita(r);
+  }
 
-    if (!pode.coletar()) { rc($main, h('div', { class: 'aviso' }, 'Seu perfil permite apenas consulta.')); return; }
+  async function criarVisita(r) {
+    const vs = await visitasDe(r.id);
+    const pessoas = await pessoasMap();
+    const pos = await Foto.posicaoAtual(60000).catch(() => null);
+    const v = {
+      id: DB.uuid(), registroId: r.id, tipo: r.tipo,
+      numero: Math.max(0, ...vs.map((x) => +x.numero || 0)) + 1,
+      data: X.hojeISO(), hora_inicio: horaAgora(), hora_fim: '', status: 'andamento',
+      fiscais: snapshotAssinantes(r.fiscais && r.fiscais.length ? r.fiscais : fiscaisPadrao(r.tipo), pessoas, true),
+      equipe: '', acompanhantes: '', objetivo: 'Acompanhamento e fiscalização da execução da obra.', clima: '', trabalhadores: null,
+      servicos: '', avanco_exec: null, avanco_prev: null, observacoes: '',
+      lat: pos ? pos.lat : null, lng: pos ? pos.lng : null,
+    };
+    await DB.salvar('visitas', v, email());
+    location.replace('#/visita/' + v.id);
+  }
 
-    const gps = h('div', { class: 'gps' }, h('span', { class: 'carregando' }), ' Obtendo localização GPS…');
-    Foto.iniciarGPS();
-    let off = null;
-    const ouvirGPS = () => { off = Foto.onGPS((p, err) => {
-      if (!document.body.contains(gps)) { if (off) off(); return; }
-      if (p) {
-        gps.className = 'gps ' + (p.precisao <= 30 ? 'bom' : '');
-        rc(gps, '📍 ' + Foto.textoCoord(p.lat, p.lng) + ' · precisão ±' + p.precisao + ' m');
-      } else if (err) {
-        gps.className = 'gps ruim';
-        rc(gps, '⚠️ GPS indisponível: ' + (err.code === 1 ? 'permissão negada — libere a localização para este app.' : 'ative a localização do aparelho.'));
+  /* Processa fotos (camera/galeria) e grava no aparelho */
+  async function salvarFotos(arquivos, origem, r, v, opt, status) {
+    const salvas = [];
+    for (let i = 0; i < arquivos.length; i++) {
+      const arq = arquivos[i];
+      if (status) rc(status, h('span', { class: 'carregando' }), ' Processando foto ' + (i + 1) + ' de ' + arquivos.length + '…');
+      try {
+        const exif = await Foto.lerExif(arq);
+        let dataHora, lat = null, lng = null, precisao = null;
+        if (origem === 'camera') {
+          dataHora = new Date().toISOString();
+          const p = await Foto.posicaoAtual(120000);
+          if (p) { lat = p.lat; lng = p.lng; precisao = p.precisao; }
+          else if (exif.lat != null) { lat = exif.lat; lng = exif.lng; }
+        } else {
+          dataHora = exif.dataHora || new Date(arq.lastModified || Date.now()).toISOString();
+          if (exif.lat != null) { lat = exif.lat; lng = exif.lng; }
+        }
+        const carimbar = origem === 'camera' || opt.carimbarGaleria;
+        const linhas = carimbar ? [Foto.textoDataHora(dataHora), lat != null ? Foto.textoCoord(lat, lng) : 'sem coordenadas', r.apelido] : null;
+        const res = await Foto.processar(arq, { carimbo: linhas, angulo: arq.angulo, origemCamera: arq.angulo !== undefined });
+        const foto = { id: DB.uuid(), registroId: r.id, visitaId: v ? v.id : null, tipo: r.tipo, dataHora, lat, lng, precisao, origem,
+          carimbada: !!carimbar, largura: res.largura, altura: res.altura, miniatura: res.miniatura, descricao: '', irregular: !!opt.irregular };
+        await DB.blobSet(foto.id, res.blob);
+        await DB.salvar('fotos', foto, email());
+        salvas.push(foto);
+        if (opt.irregular) {
+          const edit = { descricao: '' };
+          const desc = await modal('⚠️ Descreva a irregularidade', h('div', {},
+            h('img', { class: 'grande', src: res.miniatura }),
+            campo('O que está irregular?', inputArea(edit, 'descricao', { placeholder: 'Ex.: Trincas no contrapiso do refeitório' }))),
+          [{ txt: 'Não é irregularidade', valor: '__normal' },
+            { txt: 'Salvar', cls: 'pri', valor: () => edit.descricao, antes: () => { if (!edit.descricao.trim()) { toast('Descreva a irregularidade (ou marque como foto normal).', true); return false; } } }]);
+          const salvo = await atualizarCampos('fotos', foto.id, (o) => {
+            if (desc === '__normal') o.irregular = false;
+            else if (desc) o.descricao = desc.trim();
+          });
+          if (salvo) Object.assign(foto, salvo);
+        }
+      } catch (e) {
+        console.error(e);
+        toast('Erro ao processar foto: ' + e.message, true);
       }
-    }); };
+    }
+    return salvas;
+  }
 
+  async function telaVisita(id) {
+    const tk = rotaSeq; // a tela desiste se o usuário já foi para outra
+    const v0 = await DB.get('visitas', id);
+    if (!v0 || v0.excluido) { rcT(tk, h('div', { class: 'vazio' }, 'Visita não encontrada.')); return; }
+    const r = await DB.get('registros', v0.registroId);
+    if (!r) { rcT(tk, h('div', { class: 'vazio' }, 'Obra desta visita não encontrada.')); return; }
+    marcarNav(r.tipo === 'convenio' ? 'convenios' : 'contratos');
+    titulo('Visita nº ' + v0.numero + ' · ' + r.apelido, true);
+    const v = JSON.parse(JSON.stringify(v0));
+    let vBase = clonar(v0);
+    const podeEd = pode.coletar();
+    const pessoas = await pessoasMap();
+    let sujo = false;
+    const marcar = () => { sujo = true; };
+
+    const salvarVisita = async (silencioso) => {
+      v.fiscais = snapshotAssinantes(edFiscais, pessoas, true);
+      const salvo = await salvarMudancas('visitas', vBase, v);
+      Object.assign(v0, salvo);
+      vBase = clonar(v);
+      sujo = false;
+      if (!silencioso) toast('Dados da visita salvos');
+    };
+    App._sairNotif = async () => { if (sujo && podeEd) await salvarVisita(true); };
+
+    /* --- cabecalho --- */
+    const cab = h('div', { class: 'card' },
+      h('span', { class: 'badge ' + (v.status === 'concluida' ? 'emit' : 'rasc'), style: { float: 'right' } }, v.status === 'concluida' ? 'Concluída' : 'Em andamento'),
+      h('div', { class: 'sub' }, ROTULO[r.tipo] + ' nº ' + (r.numero || '—')),
+      h('h2', { style: { margin: '2px 0 4px' } }, r.apelido),
+      h('div', { class: 'sub' }, 'Visita nº ' + v.numero + ' · ' + X.dataBR(v.data) + (v.hora_inicio ? ' · início ' + v.hora_inicio : '') + (v.hora_fim ? ' · fim ' + v.hora_fim : '')));
+
+    /* --- captura --- */
+    const gps = h('div', { class: 'gps' }, h('span', { class: 'carregando' }), ' Obtendo localização GPS…');
+    const status = h('div', { class: 'sub', style: { minHeight: '20px', margin: '6px 0 0' } });
+    const opt = { carimbarGaleria: await DB.kvGet('carimbarGaleria', false), irregular: false };
     const inpCam = h('input', { type: 'file', accept: 'image/*', capture: 'environment', class: 'oculto' });
     const inpGal = h('input', { type: 'file', accept: 'image/*', multiple: true, class: 'oculto' });
-    const opt = { carimbarGaleria: (await DB.kvGet('carimbarGaleria', false)) };
-    const chkGal = h('input', { type: 'checkbox', checked: opt.carimbarGaleria ? 'checked' : null, onchange: (e) => { opt.carimbarGaleria = e.target.checked; DB.kvSet('carimbarGaleria', e.target.checked); } });
-    const lista = h('div');
-    const status = h('div', { class: 'sub', style: { minHeight: '20px', margin: '6px 0' } });
-
-    async function redesenhar() {
-      const fotos = await fotosDe(registroId);
-      rc(lista, h('h3', { class: 'sub' }, 'Fotos desta obra (' + fotos.length + ')'),
-        gradeFotos(fotos, { onclick: (f) => abrirFoto(f, redesenhar) }));
-    }
-
-    async function processar(arquivos, origem) {
-      for (let i = 0; i < arquivos.length; i++) {
-        const arq = arquivos[i];
-        rc(status, h('span', { class: 'carregando' }), ' Processando foto ' + (i + 1) + ' de ' + arquivos.length + '…');
-        try {
-          const exif = await Foto.lerExif(arq);
-          let dataHora, lat = null, lng = null, precisao = null;
-          if (origem === 'camera') {
-            dataHora = new Date().toISOString();
-            const p = await Foto.posicaoAtual(120000);
-            if (p) { lat = p.lat; lng = p.lng; precisao = p.precisao; }
-            else if (exif.lat != null) { lat = exif.lat; lng = exif.lng; }
-          } else {
-            dataHora = exif.dataHora || new Date(arq.lastModified || Date.now()).toISOString();
-            if (exif.lat != null) { lat = exif.lat; lng = exif.lng; }
+    let fila = Promise.resolve();
+    const disparar = async (irregular, galeria) => {
+      opt.irregular = irregular;
+      if (galeria || !Camera.suportada() || prefCamera() === 'aparelho') { (galeria ? inpGal : inpCam).click(); return; }
+      let nFotos = 0, nIrr = 0;
+      try {
+        if (irregular) {
+          const res = await Camera.abrir({ modo: 'unica', titulo: '⚠️ Irregularidade · ' + r.apelido });
+          const blob = res && res.aparelho ? res.aparelho[0] : res;
+          if (blob) { const sv = await salvarFotos([blob], 'camera', r, v0, { irregular: true }); nIrr += sv.filter((x) => x.irregular).length; nFotos += sv.length; }
+        } else {
+          const res = await Camera.abrir({
+            titulo: 'Visita nº ' + v0.numero + ' · ' + r.apelido,
+            aoFoto: (blob) => {
+              const pr = fila.then(() => salvarFotos([blob], 'camera', r, v0, { irregular: false })).then((sv) => { nFotos += sv.length; return sv[0]; });
+              fila = pr.catch(() => {});
+              return pr;
+            },
+            urlFoto: async (foto) => { const bl = await DB.blobGet(foto.id); return bl ? URL.createObjectURL(bl) : null; },
+            aoExcluir: async (foto) => { if (foto) { await executarExclusao(await planoExclusao([foto.id])); nFotos--; } },
+          });
+          await fila;
+          if (res && res.aparelho) {
+            const sv = await salvarFotos(Array.from(res.aparelho), 'camera', r, v0, { irregular: false }, status);
+            nFotos += sv.length;
           }
-          const carimbar = origem === 'camera' || opt.carimbarGaleria;
-          const linhas = carimbar ? [Foto.textoDataHora(dataHora), lat != null ? Foto.textoCoord(lat, lng) : 'sem coordenadas', r.apelido] : null;
-          const res = await Foto.processar(arq, { carimbo: linhas });
-          const foto = { id: DB.uuid(), registroId, tipo: r.tipo, dataHora, lat, lng, precisao, origem, carimbada: !!carimbar,
-            largura: res.largura, altura: res.altura, miniatura: res.miniatura, descricao: '' };
-          await DB.blobSet(foto.id, res.blob);
-          await DB.salvar('fotos', foto, email());
-          if (arquivos.length === 1) {
-            const edit = { descricao: '' };
-            const desc = await modal('Descrição do problema (opcional)', h('div', {},
-              h('img', { class: 'grande', src: res.miniatura }),
-              campo('O que foi constatado nesta foto?', inputArea(edit, 'descricao', { placeholder: 'Ex.: Trincas no contrapiso do refeitório' }))),
-            [{ txt: 'Pular', valor: null }, { txt: 'Salvar', cls: 'pri', valor: () => edit.descricao }]);
-            if (desc) { foto.descricao = desc; await DB.salvar('fotos', foto, email()); }
-          }
-        } catch (e) {
-          console.error(e);
-          toast('Erro ao processar foto: ' + e.message, true);
         }
+      } catch (e) {
+        console.warn(e);
+        toast('Não foi possível abrir a câmera do app (' + (e.name === 'NotAllowedError' ? 'permissão negada' : e.message) + '). Usando a câmera do aparelho.', true);
+        inpCam.click();
+        return;
       }
-      rc(status, arquivos.length ? '✅ ' + arquivos.length + ' foto(s) salva(s) no aparelho.' : '');
-      redesenhar();
-    }
-    inpCam.addEventListener('change', () => { const f = Array.from(inpCam.files); inpCam.value = ''; processar(f, 'camera'); });
-    inpGal.addEventListener('change', () => { const f = Array.from(inpGal.files); inpGal.value = ''; processar(f, 'galeria'); });
+      rc(status, nFotos ? '✅ ' + nFotos + ' foto(s) salva(s)' + (nIrr ? ' · ⚠️ ' + nIrr + ' irregularidade(s)' : '') + '.' : '');
+      desenharFotos();
+    };
+    const aoSelecionar = async (inp, origem) => {
+      const f = Array.from(inp.files); inp.value = '';
+      if (!f.length) return;
+      const salvas = await salvarFotos(f, origem, r, v0, Object.assign({}, opt), status);
+      const nIrr = salvas.filter((x) => x.irregular).length;
+      rc(status, salvas.length ? '✅ ' + salvas.length + ' foto(s) salva(s)' + (nIrr ? ' · ⚠️ ' + nIrr + ' irregularidade(s)' : '') + '.' : '');
+      desenharFotos();
+    };
+    inpCam.addEventListener('change', () => aoSelecionar(inpCam, 'camera'));
+    inpGal.addEventListener('change', () => aoSelecionar(inpGal, 'galeria'));
+    const chkGal = h('input', { type: 'checkbox', checked: opt.carimbarGaleria ? 'checked' : null, onchange: (e) => { opt.carimbarGaleria = e.target.checked; DB.kvSet('carimbarGaleria', e.target.checked); } });
+    const captura = podeEd ? h('div', { class: 'card' },
+      h('div', { class: 'grade-bt' },
+        h('button', { class: 'btn pri grande', onclick: () => disparar(false) }, '📷 Câmera'),
+        h('button', { class: 'btn alerta grande', onclick: () => disparar(true) }, '⚠️ Irregularidade')),
+      h('div', { class: 'acoes' },
+        h('button', { class: 'btn peq', onclick: () => disparar(false, true) }, '🖼️ Galeria'),
+        h('button', { class: 'btn peq', onclick: () => disparar(true, true) }, '🖼️ Irregularidade da galeria')),
+      h('label', { class: 'linha sub', style: { marginTop: '8px' } }, chkGal, ' Carimbar data/hora/GPS nas fotos da galeria'),
+      h('div', { class: 'dica' }, 'Câmera: fica aberta para várias fotos seguidas, sem pedir descrição. Para irregularidades use o botão ⚠️ Irregularidade.'),
+      status, inpCam, inpGal) : null;
 
-    rc($main, gps,
-      h('div', { class: 'card' },
-        h('button', { class: 'btn pri grande bloco', onclick: () => inpCam.click() }, '📷 Tirar foto'),
-        h('div', { style: { height: '8px' } }),
-        h('button', { class: 'btn bloco', onclick: () => inpGal.click() }, '🖼️ Importar da galeria'),
-        h('label', { class: 'linha sub', style: { marginTop: '10px' } }, chkGal, ' Carimbar data/hora/GPS nas fotos importadas da galeria'),
-        h('div', { class: 'dica' }, 'Fotos tiradas pelo app recebem carimbo com data, hora, coordenadas e nome da obra. Fotos da galeria mantêm data e GPS originais (quando existirem).'),
-        status, inpCam, inpGal),
+    /* --- fotos --- */
+    const boxFotos = h('div');
+    const boxIrr = h('div');
+    async function desenharFotos() {
+      const fotos = (await DB.byIndex('fotos', 'visitaId', id)).filter((f) => !f.excluido).sort((a, b) => String(a.dataHora).localeCompare(b.dataHora));
+      const irr = fotos.filter((f) => f.irregular);
+      rc(boxFotos, h('h2', {}, 'Fotos da visita (' + fotos.length + ')'),
+        fotos.length ? gradeFotos(fotos, { marcarRelatorio: true, onclick: (f) => abrirFoto(f, desenharFotos) }) : h('div', { class: 'vazio' }, 'Nenhuma foto ainda.'),
+        fotos.some((f) => f.fora_relatorio) ? h('div', { class: 'dica' }, 'Fotos esmaecidas não entram no relatório.') : null);
+      const reverif = await reverificadasNaVisita(r, id);
+      const nIrr = irr.length + reverif.length;
+      rc(boxIrr, h('h2', {}, '⚠️ Irregularidades (' + nIrr + ')'),
+        nIrr ? h('div', { class: 'lista-ord' }, reverif.map((f) => {
+          const img = h('img'); fotoAtualIrr(f).then(urlFoto).then((u) => { img.src = u; });
+          return h('div', { class: 'li', style: { cursor: 'pointer' }, onclick: () => { location.hash = '#/irregularidade/' + f.id + '/' + id; } }, img,
+            h('div', { style: { flex: 1 } }, h('div', {}, f.descricao || '(sem descrição)'),
+              h('div', { class: 'sub' }, '✗ Não sanada nesta visita · constatada em ' + dataHoraBR(f.dataHora).slice(0, 10))));
+        }), irr.map((f) => {
+          const img = h('img'); urlFoto(f).then((u) => { img.src = u; });
+          return h('div', { class: 'li', style: { cursor: 'pointer' }, onclick: () => abrirFoto(f, desenharFotos) }, img, h('div', { style: { flex: 1 } }, h('div', {}, f.descricao || '(sem descrição)'), h('div', { class: 'sub' }, dataHoraBR(f.dataHora))));
+        })) : h('div', { class: 'sub' }, 'Nenhuma irregularidade registrada nesta visita.'),
+        nIrr && pode.notificar() ? h('div', { class: 'acoes' }, h('button', { class: 'btn', onclick: async () => { await salvarVisita(true); notificarVisita(v0, r); } }, '📝 Gerar notificação com estas irregularidades')) : null,
+        reverif.length ? h('div', { class: 'dica' }, 'Irregularidades não sanadas entram na notificação com a foto nova desta visita.') : null);
+      boxIrr.className = 'card';
+      boxFotos.className = 'card';
+      const pend = (await irregularidadesDe(r.id)).filter((f) => situacao(f) === 'pendente' && f.visitaId !== id);
+      rc(boxPend, h('h2', {}, '📋 Pendências de visitas anteriores (' + pend.length + ')'),
+        pend.length ? h('p', { class: 'sub' }, 'Verifique cada uma e registre se foi sanada, com foto e descrição do que foi feito.') : h('div', { class: 'sub' }, 'Nenhuma irregularidade pendente nesta obra.'),
+        pend.map((f) => itemIrregularidade(f, () => { location.hash = '#/irregularidade/' + f.id + '/' + id; })));
+      boxPend.className = 'card';
+    }
+    const boxPend = h('div');
+
+    /* --- dados --- */
+    const edFiscais = (v.fiscais || []).map((f) => ({ pessoaId: f.pessoaId, funcao: f.funcao }));
+    const ro = !podeEd;
+    const num = (k, attrs) => h('input', Object.assign({ type: 'number', inputmode: 'decimal', value: v[k] == null ? '' : v[k], readonly: ro,
+      oninput: (e) => { v[k] = e.target.value === '' ? null : Number(e.target.value); marcar(); } }, attrs || {}));
+    const txt = (k, attrs) => inputTxt(v, k, Object.assign({ readonly: ro, oninput: (e) => { v[k] = e.target.value; marcar(); } }, attrs || {}));
+    const area = (k, attrs) => inputArea(v, k, Object.assign({ readonly: ro, oninput: (e) => { v[k] = e.target.value; marcar(); } }, attrs || {}));
+    const dados = h('details', { class: 'card', open: sessionStorage.getItem('visita_dados_aberto') === '1' ? true : null,
+      ontoggle: (e) => sessionStorage.setItem('visita_dados_aberto', e.target.open ? '1' : '0') },
+      h('summary', { style: { fontWeight: '600', cursor: 'pointer' } }, 'Dados da visita (para o relatório)'),
+      h('div', { style: { marginTop: '10px' } },
+        h('div', { class: 'grade2' },
+          campo('Data', h('input', { type: 'date', value: v.data, readonly: ro, oninput: (e) => { v.data = e.target.value; marcar(); } })),
+          h('div', { class: 'grade2' },
+            campo('Início', h('input', { type: 'time', value: v.hora_inicio || '', readonly: ro, oninput: (e) => { v.hora_inicio = e.target.value; marcar(); } })),
+            campo('Fim', h('input', { type: 'time', value: v.hora_fim || '', readonly: ro, oninput: (e) => { v.hora_fim = e.target.value; marcar(); } })))),
+        campo('Objetivo da visita', txt('objetivo')),
+        h('h3', {}, 'Equipe de fiscalização'),
+        ro ? h('div', { class: 'sub' }, (v.fiscais || []).map((f) => f.nome).join(', ')) : h('div', { onchange: marcar, onclick: (e) => { if (e.target.tagName === 'BUTTON') marcar(); } }, editorAssinantes(edFiscais, pessoas, 'fiscal', true, r.tipo)),
+        campo('Acompanhantes (empresa/prefeitura)', txt('acompanhantes', { placeholder: 'Ex.: Eng. Fulano (responsável técnico da contratada)' })),
+        h('h3', {}, 'Condições do canteiro'),
+        h('div', { class: 'grade2' },
+          campo('Condições do tempo', h('select', { disabled: ro, onchange: (e) => { v.clima = e.target.value; marcar(); } }, CLIMAS.map((c) => h('option', { value: c, selected: v.clima === c ? 'selected' : null }, c || '—')))),
+          campo('Trabalhadores no canteiro', num('trabalhadores', { min: '0', step: '1' }))),
+        campo('Serviços em execução', area('servicos', { style: { minHeight: '60px' } })),
+        h('div', { class: 'grade2' },
+          campo('Avanço físico executado (%)', num('avanco_exec', { min: '0', max: '100', step: '0.1' })),
+          campo('Avanço previsto no cronograma (%)', num('avanco_prev', { min: '0', max: '100', step: '0.1' }))),
+        campo('Observações gerais', area('observacoes'), 'Use **texto** para negrito. Cada linha vira um parágrafo.'),
+        podeEd ? h('button', { class: 'btn pri', onclick: () => salvarVisita() }, '💾 Salvar dados') : null));
+
+    /* --- acoes --- */
+    const acoes = h('div', { class: 'card' }, h('h2', {}, 'Relatório e encerramento'),
+      h('div', { class: 'acoes' },
+        h('button', { class: 'btn pri', onclick: async () => { if (podeEd && sujo) await salvarVisita(true); dialogoRelatorio(v0, r); } }, '📄 Relatório fotográfico'),
+        podeEd && v.status !== 'concluida' ? h('button', { class: 'btn ok', onclick: async () => {
+          if (!v.hora_fim) v.hora_fim = horaAgora();
+          v.status = 'concluida';
+          await salvarVisita(true);
+          toast('Visita concluída');
+          telaVisita(id);
+        } }, '✅ Concluir visita') : null,
+        podeEd && v.status === 'concluida' ? h('button', { class: 'btn peq', onclick: async () => { v.status = 'andamento'; await salvarVisita(true); telaVisita(id); } }, 'Reabrir visita') : null,
+        (pode.admin() || v0.criadoPor === email()) ? h('button', { class: 'btn peq perigo', onclick: async () => {
+          const idsFotos = (await DB.byIndex('fotos', 'visitaId', id)).filter((f) => !f.excluido).map((f) => f.id);
+          if (!(await excluirFotos(idsFotos, 'Excluir esta visita e todas as ' + idsFotos.length + ' foto(s) dela? As verificações de irregularidades feitas nesta visita também saem do histórico.', id))) return;
+          await DB.excluir('visitas', id, email());
+          App._sairNotif = null;
+          location.replace('#/registro/' + r.id);
+        } }, 'Excluir visita') : null));
+
+    rcT(tk, cab, v.status !== 'concluida' ? gps : null, captura, boxPend, boxFotos, boxIrr, dados, acoes);
+    await desenharFotos();
+    if (tk !== rotaSeq) return; // o usuário já foi para outra tela: não liga GPS nem registra limpeza
+    App._atualizarTela = () => (document.body.contains(boxFotos) ? desenharFotos() : null); // fotos de outros aparelhos aparecem sem sair da tela
+    if (v.status !== 'concluida' && podeEd) {
+      Foto.iniciarGPS();
+      const off = Foto.onGPS((p, err) => {
+        if (!document.body.contains(gps)) { off(); return; }
+        if (p) { gps.className = 'gps ' + (p.precisao <= 30 ? 'bom' : ''); rc(gps, '📍 ' + Foto.textoCoord(p.lat, p.lng) + ' · precisão ±' + p.precisao + ' m'); }
+        else if (err) { gps.className = 'gps ruim'; rc(gps, '⚠️ GPS indisponível: ' + (err.code === 1 ? 'permissão negada — libere a localização para este app.' : 'ative a localização do aparelho.')); }
+      });
+      // ao sair da visita o GPS é desligado (antes ficava ligado até fechar o app, gastando bateria)
+      App._sairTela = () => { off(); Foto.pararGPS(); };
+    } else Foto.pararGPS();
+  }
+
+  // irregularidades de visitas anteriores verificadas como "nao sanada" nesta visita
+  async function reverificadasNaVisita(r, visitaId) {
+    return (await irregularidadesDe(r.id)).filter((f) => situacao(f) === 'pendente' && f.visitaId !== visitaId &&
+      (f.verificacoes || []).some((vf) => vf.status === 'nao_sanada' && vf.visitaId === visitaId))
+      .sort((a, b) => String(a.dataHora).localeCompare(b.dataHora));
+  }
+
+  async function notificarVisita(v, r) {
+    const daVisita = (await DB.byIndex('fotos', 'visitaId', v.id)).filter((f) => !f.excluido && f.irregular && situacao(f) !== 'sanada').sort((a, b) => String(a.dataHora).localeCompare(b.dataHora));
+    const fotos = (await reverificadasNaVisita(r, v.id)).concat(daVisita);
+    const itens = [];
+    for (const f of fotos) {
+      const t = (f.descricao || '').trim().replace(/[.;]?$/, ';');
+      if (t !== ';' && !itens.includes(t)) itens.push(t);
+    }
+    if (itens.length) itens[itens.length - 1] = itens[itens.length - 1].replace(/;$/, '.');
+    App._sairNotif = null;
+    const sel = [];
+    for (const f of fotos) sel.push(await selIrregularidade(f));
+    await criarNotificacao(r.id, { itens, fotos: sel, data_vistoria: v.data, visitaId: v.id });
+  }
+
+  async function dialogoRelatorio(v, r) {
+    const fotos = (await DB.byIndex('fotos', 'visitaId', v.id)).filter((f) => !f.excluido).sort((a, b) => String(a.dataHora).localeCompare(b.dataHora));
+    const incl = fotos.filter((f) => !f.fora_relatorio);
+    const escolha = { layout: String(await DB.kvGet('layoutRelatorio', '4')) };
+    const opcao = (val, txt, desc) => h('label', { class: 'item', style: { display: 'flex', gap: '10px', alignItems: 'center', cursor: 'pointer' } },
+      h('input', { type: 'radio', name: 'layout', value: val, checked: escolha.layout === val ? 'checked' : null, onchange: () => { escolha.layout = val; } }),
+      h('div', {}, h('div', { class: 't' }, txt), h('div', { class: 'd' }, desc)));
+    const corpo = h('div', {},
+      h('p', { class: 'sub' }, incl.length + ' de ' + fotos.length + ' foto(s) entrarão no relatório. Para retirar uma foto, abra-a e desmarque “Incluir no relatório”.'),
+      opcao('2', '2 fotos por página', 'Fotos grandes, uma abaixo da outra'),
+      opcao('4', '4 fotos por página', 'Grade 2 × 2 (recomendado)'),
+      opcao('6', '6 fotos por página', 'Grade 2 × 3, mais compacto'));
+    const acao = await modal('Relatório fotográfico', corpo, [{ txt: 'Cancelar', valor: null }, { txt: '📤 Compartilhar', valor: 'comp' }, { txt: '⬇️ Baixar Word', cls: 'pri', valor: 'baixar' }]);
+    if (!acao) return;
+    DB.kvSet('layoutRelatorio', escolha.layout);
+    const st = h('div', {}, h('span', { class: 'carregando' }), ' Gerando relatório…');
+    const fundo = h('div', { class: 'modal-fundo' }, h('div', { class: 'modal' }, st));
+    document.body.appendChild(fundo);
+    try {
+      const itens = [];
+      const faltando = [];
+      for (const f of incl) {
+        let blob = await DB.blobGet(f.id);
+        if (!blob && Sync.habilitado() && navigator.onLine) { try { blob = await Sync.baixarFoto(f); } catch (e) { /* */ } }
+        if (!blob) { faltando.push(f); continue; }
+        const leg = f.irregular ? 'IRREGULARIDADE: ' + (f.descricao || '') : (f.descricao || '');
+        itens.push({ img: blob, legenda: leg, irregular: !!f.irregular, descricao: f.descricao || '',
+          meta: dataHoraBR(f.dataHora) + (f.lat != null ? ' · ' + Foto.textoCoord(f.lat, f.lng) : '') });
+      }
+      if (faltando.length) throw new Error(faltando.length + ' foto(s) ainda não estão neste aparelho. Conecte-se à internet para baixá-las.');
+      const dados = DocGen.montarDadosRelatorio(r, v, itens, { layout: +escolha.layout });
+      const blob = await DocGen.gerar(await modeloDocx('relatorio'), dados, { type: 'blob' });
+      const nome = nomeArquivo('RELATÓRIO FOTOGRÁFICO - ' + r.apelido + ' - VISITA ' + v.numero + ' - ' + X.dataBR(v.data).replace(/\//g, '-')) + '.docx';
+      fundo.remove();
+      if (acao === 'comp') await compartilharBlob(blob, nome, nome); else baixarBlob(blob, nome);
+      toast('Relatório gerado: ' + nome);
+    } catch (e) {
+      fundo.remove();
+      console.error(e);
+      toast(e.message, true);
+    }
+  }
+
+  /* ================================================================== */
+  /* Historico de irregularidades (pendente / sanada)                    */
+  /* ================================================================== */
+  const situacao = (f) => (f.situacao === 'sanada' ? 'sanada' : 'pendente');
+
+  async function irregularidadesDe(registroId) {
+    return (await DB.byIndex('fotos', 'registroId', registroId)).filter((f) => !f.excluido && f.irregular)
+      .sort((a, b) => String(b.dataHora).localeCompare(a.dataHora));
+  }
+
+  /* Foto "atual" de uma irregularidade: a mais recente tirada numa verificacao
+     "nao sanada"; sem isso, a foto original da constatacao. */
+  async function fotoAtualIrr(f, mapa) {
+    const vs = f.verificacoes || [];
+    for (let i = vs.length - 1; i >= 0; i--) {
+      const vf = vs[i];
+      if (vf.status !== 'nao_sanada' || !vf.fotoId) continue;
+      const fv = mapa ? mapa.get(vf.fotoId) : await DB.get('fotos', vf.fotoId);
+      if (fv && !fv.excluido) return fv;
+    }
+    return f;
+  }
+  // item de anexo de notificacao para uma irregularidade (usa a foto atual)
+  async function selIrregularidade(f, mapa) {
+    const atual = await fotoAtualIrr(f, mapa);
+    return { fotoId: atual.id, irrId: f.id, legenda: legendaPadrao(f) };
+  }
+
+  function itemIrregularidade(f, onclick, extra) {
+    const img = h('img'); fotoAtualIrr(f).then((a) => urlFoto(situacao(f) === 'pendente' ? a : f)).then((u) => { img.src = u; });
+    const st = situacao(f);
+    const ult = (f.verificacoes || [])[(f.verificacoes || []).length - 1];
+    return h('div', { class: 'item', style: { cursor: 'pointer' }, onclick },
+      h('div', { class: 'item-irr' }, extra || null, img,
+        h('div', { class: 'cresce' },
+          h('span', { class: 'badge ' + st, style: { float: 'right', marginLeft: '6px' } }, st === 'sanada' ? '✓ Sanada' : 'Pendente'),
+          h('div', { class: 't', style: { fontWeight: 500 } }, f.descricao || '(sem descrição)'),
+          h('div', { class: 'd' }, 'Constatada em ' + dataHoraBR(f.dataHora).slice(0, 10) +
+            (st === 'sanada' && f.sanadaEm ? ' · sanada em ' + dataLocalBR(f.sanadaEm) : '') +
+            (st === 'pendente' && ult ? ' · última verificação ' + dataLocalBR(ult.data) + ': não sanada' : '')))));
+  }
+
+  async function painelIrregularidades(r) {
+    const todas = await irregularidadesDe(r.id);
+    const filtro = sessionStorage.getItem('filtro_irr') || 'pendente';
+    const lista = todas.filter((f) => filtro === 'todas' || situacao(f) === filtro);
+    const nP = todas.filter((f) => situacao(f) === 'pendente').length, nS = todas.length - nP;
+    const bt = (k, t) => h('button', { class: filtro === k ? 'ativo' : '', onclick: () => { sessionStorage.setItem('filtro_irr', k); telaRegistro(r.id); } }, t);
+    return h('div', {},
+      h('div', { class: 'filtros' }, bt('pendente', 'Pendentes (' + nP + ')'), bt('sanada', 'Sanadas (' + nS + ')'), bt('todas', 'Todas (' + todas.length + ')')),
+      todas.length ? h('div', { class: 'acoes', style: { marginTop: 0, marginBottom: '10px' } }, h('button', { class: 'btn', onclick: () => dialogoIrregularidades(r) }, '📄 Relatório de irregularidades')) : null,
+      lista.length ? lista.map((f) => itemIrregularidade(f, () => { location.hash = '#/irregularidade/' + f.id; }))
+        : h('div', { class: 'vazio' }, filtro === 'pendente' ? 'Nenhuma irregularidade pendente. 👍' : 'Nada por aqui.'));
+  }
+
+  async function telaIrregularidade(id, visitaId) {
+    const tk = rotaSeq; // a tela desiste se o usuário já foi para outra
+    const f = await DB.get('fotos', id);
+    if (!f || f.excluido) { rcT(tk, h('div', { class: 'vazio' }, 'Irregularidade não encontrada.')); return; }
+    const r = await DB.get('registros', f.registroId);
+    if (!r) { rcT(tk, h('div', { class: 'vazio' }, 'Obra não encontrada.')); return; }
+    titulo('Irregularidade · ' + r.apelido, true);
+    marcarNav(r.tipo === 'convenio' ? 'convenios' : 'contratos');
+    const st = situacao(f);
+    const visOrig = f.visitaId ? await DB.get('visitas', f.visitaId) : null;
+    const img = h('img', { class: 'grande' });
+    urlFoto(f, true).then((u) => { img.src = u; });
+
+    const cab = h('div', { class: 'card' },
+      h('span', { class: 'badge ' + st, style: { float: 'right' } }, st === 'sanada' ? '✓ Sanada' : 'Pendente'),
+      h('div', { class: 'sub' }, 'Constatada em ' + dataHoraBR(f.dataHora) + (visOrig ? ' · Visita nº ' + visOrig.numero : '') + ' · por ' + (f.criadoPor || '—')),
+      h('h2', { style: { margin: '6px 0 10px' } }, f.descricao || '(sem descrição)'),
+      img,
+      f.lat != null ? h('div', { class: 'sub' }, '📍 ', h('a', { href: 'https://www.google.com/maps?q=' + f.lat + ',' + f.lng, target: '_blank', rel: 'noopener' }, Foto.textoCoord(f.lat, f.lng))) : null,
+      pode.coletar() ? h('div', { class: 'acoes' }, h('button', { class: 'btn peq', onclick: () => abrirFoto(f, () => telaIrregularidade(id, visitaId)) }, '✏️ Editar descrição')) : null);
+
+    const hist = h('div', { class: 'card' }, h('h2', {}, 'Histórico de verificações'));
+    const verifs = (f.verificacoes || []).slice().reverse();
+    if (!verifs.length) ap(hist, h('div', { class: 'sub' }, 'Ainda não verificada em visita posterior.'));
+    for (const vf of verifs) {
+      const fotoV = vf.fotoId ? await DB.get('fotos', vf.fotoId) : null;
+      const box = h('div', { class: 'verif ' + vf.status },
+        h('div', {}, h('b', {}, vf.status === 'sanada' ? '✓ Sanada' : '✗ Não sanada'), ' — ', dataHoraBR(vf.data), ' · ', vf.por || '—'),
+        vf.descricao ? h('div', { style: { margin: '4px 0' } }, vf.descricao) : null);
+      if (fotoV) {
+        const i1 = h('img'), i2 = h('img');
+        urlFoto(f).then((u) => { i1.src = u; });
+        urlFoto(fotoV).then((u) => { i2.src = u; });
+        ap(box, h('div', { class: 'antes-depois' },
+          h('figure', {}, i1, h('figcaption', {}, 'Antes · ' + dataHoraBR(f.dataHora).slice(0, 10))),
+          h('figure', { onclick: () => abrirFoto(fotoV) }, i2, h('figcaption', {}, 'Depois · ' + dataHoraBR(fotoV.dataHora).slice(0, 10)))));
+      }
+      if (pode.coletar()) ap(box, h('div', { class: 'acoes', style: { marginTop: '6px' } }, h('button', { class: 'btn peq perigo', onclick: async () => {
+        let ok;
+        if (fotoV && !fotoV.excluido) ok = await excluirFotos([fotoV.id], 'Excluir este registro do histórico e a foto dele?');
+        else {
+          ok = await confirmar('Excluir este registro do histórico?', 'Excluir', true);
+          if (ok) await atualizarCampos('fotos', f.id, (o) => { o.verificacoes = (o.verificacoes || []).filter((x) => x.id !== vf.id); recalcularSituacao(o); });
+        }
+        if (ok) { toast('Registro excluído do histórico'); telaIrregularidade(id, visitaId); }
+      } }, '🗑 Excluir este registro')));
+      ap(hist, box);
+    }
+
+    const acoes = h('div', { class: 'card' },
+      pode.coletar() && st === 'pendente' ? h('div', { class: 'grade-bt' },
+        h('button', { class: 'btn ok grande', onclick: () => verificarIrregularidade(f, r, 'sanada', visitaId) }, '✓ Sanada'),
+        h('button', { class: 'btn perigo grande', onclick: () => verificarIrregularidade(f, r, 'nao_sanada', visitaId) }, '✗ Não sanada')) : null,
+      pode.coletar() && st === 'sanada' ? h('button', { class: 'btn peq', onclick: async () => {
+        if (!(await confirmar('Reabrir esta irregularidade (voltar para pendente)?', 'Reabrir'))) return;
+        await atualizarCampos('fotos', f.id, (o) => {
+          o.verificacoes = (o.verificacoes || []).concat([{ id: DB.uuid(), data: new Date().toISOString(), status: 'nao_sanada', descricao: 'Reaberta.', fotoId: null, visitaId: visitaId || null, por: email() }]);
+          recalcularSituacao(o);
+        });
+        telaIrregularidade(id, visitaId);
+      } }, '↺ Reabrir (voltar para pendente)') : null,
+      pode.coletar() ? h('div', { class: 'acoes' }, h('button', { class: 'btn peq perigo', onclick: async () => {
+        if (await excluirFotos([f.id], 'Excluir esta irregularidade (foto, descrição e todo o histórico)? Ela não aparecerá mais para ninguém do grupo.')) { toast('Irregularidade excluída'); history.back(); }
+      } }, '🗑 Excluir irregularidade')) : null,
+      h('p', { class: 'dica' }, st === 'pendente' ? 'Irregularidades pendentes aparecem como opção nas notificações. Ao marcar como sanada, ela sai das opções de notificação e fica no histórico.' : 'Sanada: não aparece mais nas opções de notificação.'));
+    rcT(tk, cab, acoes, hist);
+    App._atualizarTela = () => telaIrregularidade(id, visitaId);
+  }
+
+  async function escolherFoto(titulo, fundo) {
+    if (Camera.suportada()) {
+      if (fundo) fundo.style.display = 'none';
+      if (prefCamera() !== 'aparelho') {
+        try { const res = await Camera.abrir({ modo: 'unica', titulo }); return res && res.aparelho ? res.aparelho[0] : res; }
+        catch (e) { /* cai para o seletor */ } finally { if (fundo) fundo.style.display = ''; }
+      } else if (fundo) fundo.style.display = '';
+    }
+    return new Promise((res) => {
+      const inp = h('input', { type: 'file', accept: 'image/*', capture: 'environment' });
+      inp.addEventListener('change', () => res(inp.files[0] || null));
+      inp.click();
+    });
+  }
+
+  async function verificarIrregularidade(f, r, status, visitaId) {
+    const dado = { descricao: '', foto: null, origem: 'camera' };
+    const prev = h('div', { class: 'antes-depois', style: { marginBottom: '10px' } });
+    const imgAntes = h('img'); urlFoto(f).then((u) => { imgAntes.src = u; });
+    const imgDepois = h('img');
+    rc(prev, h('figure', {}, imgAntes, h('figcaption', {}, 'Antes')), h('figure', {}, imgDepois, h('figcaption', {}, 'Depois (toque em Câmera ou Galeria)')));
+    const inpGal = h('input', { type: 'file', accept: 'image/*', class: 'oculto' });
+    inpGal.addEventListener('change', () => { if (inpGal.files[0]) { dado.foto = inpGal.files[0]; dado.origem = 'galeria'; imgDepois.src = URL.createObjectURL(dado.foto); } });
+    const corpo = h('div', {},
+      h('p', { class: 'sub', style: { marginTop: 0 } }, f.descricao || ''),
+      prev,
+      h('div', { class: 'acoes', style: { marginTop: 0 } },
+        h('button', { class: 'btn', onclick: async (e) => {
+          const b = await escolherFoto('Depois · ' + (f.descricao || ''), e.target.closest('.modal-fundo'));
+          if (b) { dado.foto = b; dado.origem = 'camera'; imgDepois.src = URL.createObjectURL(b); }
+        } }, '📷 Câmera'),
+        h('button', { class: 'btn', onclick: () => inpGal.click() }, '🖼️ Galeria'), inpGal),
+      campo(status === 'sanada' ? 'O que foi feito (providência adotada) *' : 'Situação encontrada *',
+        inputArea(dado, 'descricao', { placeholder: status === 'sanada' ? 'Ex.: Telhas substituídas e cumeeiras refixadas.' : 'Ex.: Empresa ainda não iniciou a correção.' })));
+    const ok = await modal(status === 'sanada' ? '✓ Registrar como sanada' : '✗ Registrar como não sanada', corpo, [
+      { txt: 'Cancelar', valor: false },
+      { txt: 'Salvar', cls: status === 'sanada' ? 'ok' : 'pri', valor: true, antes: () => {
+        if (!dado.descricao.trim()) { toast('Descreva ' + (status === 'sanada' ? 'o que foi feito.' : 'a situação encontrada.'), true); return false; }
+        if (status === 'sanada' && !dado.foto) return confirmar('Registrar como sanada sem foto do “depois”?', 'Registrar sem foto');
+      } }]);
+    if (!ok) return;
+    let fotoV = null;
+    if (dado.foto) {
+      const visita = visitaId ? await DB.get('visitas', visitaId) : null;
+      const sv = await salvarFotos([dado.foto], dado.origem, r, visita, { irregular: false });
+      fotoV = sv[0] || null;
+      if (fotoV) {
+        const desc = (status === 'sanada' ? 'Correção: ' : 'Verificação: ') + dado.descricao.trim();
+        fotoV = (await atualizarCampos('fotos', fotoV.id, (o) => { o.verificacaoDe = f.id; o.descricao = desc; })) || fotoV;
+      }
+    }
+    const agora = new Date().toISOString();
+    await atualizarCampos('fotos', f.id, (o) => {
+      o.verificacoes = (o.verificacoes || []).concat([{ id: DB.uuid(), data: agora, status, descricao: dado.descricao.trim(), fotoId: fotoV ? fotoV.id : null, visitaId: visitaId || null, por: email() }]);
+      recalcularSituacao(o);
+    });
+    toast(status === 'sanada' ? 'Irregularidade registrada como sanada' : 'Verificação registrada: não sanada');
+    if (visitaId) history.back(); else telaIrregularidade(f.id, visitaId);
+  }
+
+  /* Relatório de irregularidades: escolhe quais (pendentes e/ou sanadas) e gera o Word com o histórico completo e fotos */
+  async function dialogoIrregularidades(r) {
+    const todas = (await irregularidadesDe(r.id)).sort((a, b) => String(a.dataHora).localeCompare(b.dataHora));
+    const sel = new Set(todas.map((f) => f.id));
+    const caixas = new Map();
+    const contagem = h('div', { class: 'sub', style: { margin: '4px 0 8px' } });
+    const atualizar = () => {
+      caixas.forEach((c, id) => { c.checked = sel.has(id); });
+      const nS = todas.filter((f) => sel.has(f.id) && situacao(f) === 'sanada').length;
+      contagem.textContent = sel.size + ' de ' + todas.length + ' selecionada(s)' + (sel.size ? ' — ' + (sel.size - nS) + ' pendente(s), ' + nS + ' sanada(s)' : '');
+    };
+    const lista = h('div', {}, todas.map((f) => {
+      const chk = h('input', { type: 'checkbox', onclick: (e) => e.stopPropagation(), onchange: (e) => { if (e.target.checked) sel.add(f.id); else sel.delete(f.id); atualizar(); } });
+      caixas.set(f.id, chk);
+      return itemIrregularidade(f, () => { if (sel.has(f.id)) sel.delete(f.id); else sel.add(f.id); atualizar(); }, chk);
+    }));
+    const marcar = (filtro) => { sel.clear(); todas.filter(filtro).forEach((f) => sel.add(f.id)); atualizar(); };
+    const corpo = h('div', {},
+      h('p', { class: 'sub', style: { marginTop: 0 } }, 'Selecione as irregularidades do relatório. Cada uma sai com a foto da constatação e todo o histórico de verificações (sanada / não sanada), com as fotos.'),
+      h('div', { class: 'filtros', style: { marginBottom: '4px' } },
+        h('button', { onclick: () => marcar(() => true) }, 'Todas'),
+        h('button', { onclick: () => marcar((f) => situacao(f) === 'pendente') }, 'Só pendentes'),
+        h('button', { onclick: () => marcar((f) => situacao(f) === 'sanada') }, 'Só sanadas'),
+        h('button', { onclick: () => marcar(() => false) }, 'Nenhuma')),
+      contagem, lista);
+    atualizar();
+    const exige = () => { if (!sel.size) { toast('Selecione ao menos uma irregularidade.', true); return false; } };
+    const acao = await modal('Relatório de irregularidades', corpo, [{ txt: 'Cancelar', valor: null }, { txt: '📤 Compartilhar', valor: 'comp', antes: exige }, { txt: '⬇️ Baixar Word', cls: 'pri', valor: 'baixar', antes: exige }]);
+    if (!acao || !sel.size) return;
+    const st = h('div', {}, h('span', { class: 'carregando' }), ' Gerando relatório…');
+    const fundo = h('div', { class: 'modal-fundo' }, h('div', { class: 'modal' }, st));
+    document.body.appendChild(fundo);
+    try {
+      const faltando = [];
+      const pegar = async (foto) => {
+        if (!foto || foto.excluido) return null;
+        let b = await DB.blobGet(foto.id);
+        if (!b && Sync.habilitado() && navigator.onLine) { try { b = await Sync.baixarFoto(foto); } catch (e) { /* */ } }
+        if (!b) faltando.push(foto.id);
+        return b || null;
+      };
+      const visitaTxt = async (vid) => { const v = vid ? await DB.get('visitas', vid) : null; return v ? 'Visita nº ' + v.numero : ''; };
+      const itens = [];
+      let k = 0;
+      for (const f of todas.filter((x) => sel.has(x.id))) {
+        rc(st, h('span', { class: 'carregando' }), ' Preparando irregularidade ' + (++k) + ' de ' + sel.size + '…');
+        const historico = [];
+        for (const vf of f.verificacoes || []) {
+          const fotoV = vf.fotoId ? await DB.get('fotos', vf.fotoId) : null;
+          historico.push({
+            data: vf.data ? dataHoraBR(vf.data) : '',
+            status: vf.status === 'sanada' ? 'SANADA' : 'NÃO SANADA',
+            descricao: vf.descricao || '',
+            visita: await visitaTxt(vf.visitaId),
+            por: vf.por || '',
+            img: await pegar(fotoV),
+          });
+        }
+        itens.push({
+          descricao: f.descricao || '',
+          sanada: situacao(f) === 'sanada',
+          sanada_em: f.sanadaEm ? dataLocalBR(f.sanadaEm) : '',
+          constatada_data: dataHoraBR(f.dataHora),
+          constatada_visita: await visitaTxt(f.visitaId),
+          constatada_por: f.criadoPor || '',
+          img: await pegar(f),
+          historico,
+        });
+      }
+      if (faltando.length && !(await confirmar(faltando.length + ' foto(s) ainda não estão neste aparelho (sem internet para baixá-las). Gerar o relatório sem elas?', 'Gerar sem elas'))) { fundo.remove(); return; }
+      rc(st, h('span', { class: 'carregando' }), ' Montando o documento…');
+      const pessoas = await pessoasMap();
+      const fiscais = snapshotAssinantes(r.fiscais && r.fiscais.length ? r.fiscais : fiscaisPadrao(r.tipo), pessoas, true);
+      const dados = DocGen.montarDadosIrregularidades(r, itens, fiscais, X.hojeISO());
+      const blob = await DocGen.gerar(await modeloDocx('irregularidades'), dados, { type: 'blob' });
+      const nome = nomeArquivo('RELATÓRIO DE IRREGULARIDADES - ' + r.apelido + ' - ' + X.dataBR(X.hojeISO()).replace(/\//g, '-')) + '.docx';
+      fundo.remove();
+      if (acao === 'comp') await compartilharBlob(blob, nome, nome); else baixarBlob(blob, nome);
+      toast('Relatório gerado: ' + nome);
+    } catch (e) {
+      fundo.remove();
+      console.error(e);
+      toast(e.message, true);
+    }
+  }
+
+  async function dialogoSanadas(r) {
+    const sanadas = (await irregularidadesDe(r.id)).filter((f) => situacao(f) === 'sanada')
+      .sort((a, b) => String(a.dataHora).localeCompare(b.dataHora));
+    const sel = new Set(sanadas.map((f) => f.id));
+    const lista = h('div', {}, sanadas.map((f) => {
+      const chk = h('input', { type: 'checkbox', checked: 'checked', onclick: (e) => e.stopPropagation(), onchange: (e) => { if (e.target.checked) sel.add(f.id); else sel.delete(f.id); } });
+      return itemIrregularidade(f, () => { chk.checked = !chk.checked; chk.dispatchEvent(new Event('change')); }, chk);
+    }));
+    const corpo = h('div', {}, h('p', { class: 'sub', style: { marginTop: 0 } }, 'Selecione as irregularidades sanadas que devem constar no relatório (antes e depois).'),
+      h('div', { class: 'acoes', style: { marginTop: 0, marginBottom: '8px' } },
+        h('button', { class: 'btn peq', onclick: () => { lista.querySelectorAll('input[type=checkbox]').forEach((c) => { c.checked = true; }); sanadas.forEach((f) => sel.add(f.id)); } }, 'Marcar todas'),
+        h('button', { class: 'btn peq', onclick: () => { lista.querySelectorAll('input[type=checkbox]').forEach((c) => { c.checked = false; }); sel.clear(); } }, 'Desmarcar todas')),
       lista);
-    ouvirGPS();
-    redesenhar();
+    const acao = await modal('Relatório de irregularidades sanadas', corpo, [{ txt: 'Cancelar', valor: null }, { txt: '📤 Compartilhar', valor: 'comp' }, { txt: '⬇️ Baixar Word', cls: 'pri', valor: 'baixar' }]);
+    if (!acao) return;
+    if (!sel.size) { toast('Selecione ao menos uma irregularidade.', true); return; }
+    const fundo = h('div', { class: 'modal-fundo' }, h('div', { class: 'modal' }, h('span', { class: 'carregando' }), ' Gerando relatório…'));
+    document.body.appendChild(fundo);
+    try {
+      const pegar = async (foto) => {
+        if (!foto) return null;
+        let b = await DB.blobGet(foto.id);
+        if (!b && Sync.habilitado() && navigator.onLine) { try { b = await Sync.baixarFoto(foto); } catch (e) { /* */ } }
+        if (!b) throw new Error('Há fotos que ainda não estão neste aparelho. Conecte-se à internet e tente de novo.');
+        return b;
+      };
+      const itens = [];
+      for (const f of sanadas.filter((x) => sel.has(x.id))) {
+        const vf = (f.verificacoes || []).filter((x) => x.status === 'sanada').pop() || {};
+        const fotoV = vf.fotoId ? await DB.get('fotos', vf.fotoId) : null;
+        const visA = f.visitaId ? await DB.get('visitas', f.visitaId) : null;
+        const visD = vf.visitaId ? await DB.get('visitas', vf.visitaId) : null;
+        itens.push({
+          antes_img: await pegar(f), antes_desc: f.descricao || '', antes_data: dataHoraBR(f.dataHora).slice(0, 10), antes_visita: visA ? 'Visita nº ' + visA.numero : '',
+          depois_img: fotoV ? await pegar(fotoV) : null, depois_desc: vf.descricao || '', depois_data: vf.data ? dataLocalBR(vf.data) : '—',
+          depois_visita: visD ? 'Visita nº ' + visD.numero : (fotoV ? '' : 'sem foto'), verificado_por: vf.por || '',
+        });
+      }
+      const pessoas = await pessoasMap();
+      const fiscais = snapshotAssinantes(r.fiscais && r.fiscais.length ? r.fiscais : fiscaisPadrao(r.tipo), pessoas, true);
+      const dados = DocGen.montarDadosSanadas(r, itens, fiscais, X.hojeISO());
+      const blob = await DocGen.gerar(await modeloDocx('sanadas'), dados, { type: 'blob' });
+      const nome = nomeArquivo('IRREGULARIDADES SANADAS - ' + r.apelido + ' - ' + X.dataBR(X.hojeISO()).replace(/\//g, '-')) + '.docx';
+      fundo.remove();
+      if (acao === 'comp') await compartilharBlob(blob, nome, nome); else baixarBlob(blob, nome);
+      toast('Relatório gerado: ' + nome);
+    } catch (e) {
+      fundo.remove();
+      console.error(e);
+      toast(e.message, true);
+    }
   }
 
   /* ================================================================== */
@@ -675,6 +1745,119 @@
   function formatarNumero(fmt, v) {
     return String(fmt || '').replace(/\{(seq|ordinal)(\d?)\}/g, (m, k, pad) => String(v[k] == null ? '' : v[k]).padStart(+pad || 0, '0'))
       .replace(/\{ano\}/g, v.ano);
+  }
+
+  const usaSequencial = (fmt) => /\{seq\d?\}/.test(fmt || '');
+  // lê um número digitado no formato configurado (ex.: "016/2026/CIPISNP/DRE-SINOP" → seq 16, ano 2026)
+  function lerNumero(fmt, txt) {
+    if (!fmt || !txt) return null;
+    const nomes = [];
+    const re = String(fmt).replace(/\{(seq|ordinal)\d?\}|\{ano\}|[.*+?^$()|[\]\\{}\/]/g, (m, k) => {
+      if (m === '{ano}') { nomes.push('ano'); return '(\\d{4})'; }
+      if (k) { nomes.push(k); return '(\\d{1,5})'; }
+      return '\\' + m;
+    });
+    const m = new RegExp('^\\s*' + re + '\\s*$', 'i').exec(String(txt));
+    if (!m) return null;
+    const out = {}; nomes.forEach((k, i) => { out[k] = +m[i + 1]; });
+    return out;
+  }
+  // texto do número enquanto rascunho (vai no Word gerado antes de emitir)
+  function numeroRascunho(n, r) {
+    const fmt = (CONFIG.formato_numero || {})[(r || {}).tipo || n.tipo] || '';
+    return n.numero || (usaSequencial(fmt) ? fmt.replace(/\{seq(\d?)\}/g, (m, p) => '_'.repeat(+p || 3)).replace(/\{ordinal(\d?)\}/g, (m, p) => String(n.ordinal || '').padStart(+p || 0, '0')).replace(/\{ano\}/g, String(n.ano || X.hojeISO().slice(0, 4))) : '');
+  }
+  // chave para achar números repetidos entre notificações emitidas
+  const chaveNumero = (n) => n.numero ? [n.tipo, n.tipo === 'contrato' ? n.registroId : '', String(n.numero).trim().toUpperCase()].join('|') : null;
+  async function numerosRepetidos() {
+    const cont = new Map(), rep = new Set();
+    const emit = await DB.listar('notificacoes', (o) => o.status === 'emitida' && o.numero);
+    for (const o of emit) { const k = chaveNumero(o); cont.set(k, (cont.get(k) || []).concat(o)); }
+    for (const l of cont.values()) if (l.length > 1) for (const o of l) rep.add(o.id);
+    return { rep, cont };
+  }
+
+  /* Define o número na hora de emitir. Com o servidor ligado, quem distribui é o servidor (sob trava):
+     dois aparelhos nunca recebem o mesmo número. Devolve { numero, seq, ano, ordinal, avisos } ou null. */
+  async function numerarNaEmissao(n, r) {
+    const fmt = (CONFIG.formato_numero || {})[r.tipo] || '';
+    const usaSeq = usaSequencial(fmt);
+    const anoHoje = +X.hojeISO().slice(0, 4);
+    const auto = !n.numero || n.numero === formatarNumero(fmt, { seq: n.seq, ano: n.ano, ordinal: n.ordinal });
+    const lido = auto ? null : lerNumero(fmt, n.numero);
+    const proprio = !auto && !lido; // número livre, fora do formato: fica como foi digitado
+    // já numerada antes (reaberta para correção, ou rascunho de versão anterior): mantém o ano e pede o mesmo número
+    const ano = lido && lido.ano ? lido.ano : (auto && n.seq && n.ano ? +n.ano : anoHoje);
+    const pedSeq = usaSeq ? (lido && lido.seq ? lido.seq : (auto && n.seq ? +n.seq : 0)) : 0;
+    const pedOrd = lido && lido.ordinal ? lido.ordinal : +n.ordinal || 0;
+    const emit = await DB.listar('notificacoes', (o) => o.id !== n.id && o.status === 'emitida');
+    const base = (CONFIG.seq_base || {})[ano];
+    let minSeq = Math.max(+base || 0, ...emit.filter((o) => +o.ano === ano && o.seq).map((o) => +o.seq || 0));
+    const minOrd = Math.max(+r.ultima_notif_anterior || 0, ...emit.filter((o) => o.registroId === r.id).map((o) => +o.ordinal || 0));
+    const semBase = usaSeq && !pedSeq && !minSeq && (base === undefined || base === null);
+    const perguntarBase = async () => {
+      const b = await perguntarNumero('Numeração do setor ' + ano,
+        'Esta é a primeira notificação numerada pelo app em ' + ano + '. Qual foi o último número de notificação emitido pelo setor em ' + ano + '? (Ex.: informe 12 se a última foi 012/' + ano + '. Informe 0 se nenhuma.)', 0);
+      if (b === null) return null;
+      if (pode.admin()) await salvarConfig((o) => { o.seq_base = Object.assign({}, o.seq_base, { [ano]: b }); });
+      return b;
+    };
+    const fim = (seq, ordinal, avisos) => ({ seq: usaSeq && !proprio ? seq : (n.seq || null), ano, ordinal, avisos: avisos || [],
+      numero: proprio ? n.numero : formatarNumero(fmt, { seq, ano, ordinal }) });
+
+    // sem servidor (uso em um aparelho só): numera no próprio aparelho, como antes
+    const local = async (motivo) => {
+      if (motivo) Sync.log('aviso', motivo);
+      let seq = pedSeq;
+      if (usaSeq && !proprio && !seq) {
+        const todas = await DB.listar('notificacoes', (o) => o.id !== n.id && +o.ano === ano && o.seq);
+        if (!todas.length && semBase) { const b = await perguntarBase(); if (b === null) return null; minSeq = b; }
+        seq = Math.max(minSeq, ...todas.map((o) => +o.seq || 0)) + 1;
+      }
+      return fim(seq, pedOrd || minOrd + 1);
+    };
+    if (!Sync.habilitado()) return local();
+    if (!navigator.onLine) { await avisoSemRedeNumero(); return null; }
+
+    const itens = () => [{ chave: 'ord:' + r.id, notificacao: n.id, desejado: pedOrd, minimo: minOrd }]
+      .concat(usaSeq && !proprio ? [{ chave: 'seq:' + ano, notificacao: n.id, desejado: pedSeq, minimo: minSeq, semBase: semBase && !minSeq }] : []);
+    const espera = h('div', { class: 'modal-fundo' }, h('div', { class: 'modal' }, h('span', { class: 'carregando' }), ' Reservando o número da notificação no servidor…'));
+    let j;
+    try {
+      document.body.appendChild(espera);
+      j = await Sync.chamar('numerar', { itens: itens() });
+      if ((j.itens || []).some((x) => x.precisaBase)) {
+        espera.remove();
+        const b = await perguntarBase(); if (b === null) return null;
+        minSeq = b;
+        document.body.appendChild(espera);
+        j = await Sync.chamar('numerar', { itens: itens().map((x) => Object.assign(x, { semBase: false })) });
+      }
+    } catch (e) {
+      // servidor ainda na versão anterior: numera no aparelho (e o aviso de número repetido continua valendo)
+      if (/A[çc][ãa]o desconhecida/i.test(e.message || '')) return local('Servidor sem numeração central (atualize o Code.gs): número calculado no aparelho.');
+      if (e.rede || !navigator.onLine) { espera.remove(); await avisoSemRedeNumero(); return null; }
+      toast(e.message || String(e), true); return null;
+    } finally { espera.remove(); }
+    const res = {}; for (const x of j.itens || []) res[x.chave.slice(0, 3)] = x;
+    if (!res.ord || (usaSeq && !proprio && !res.seq)) { toast('Resposta inesperada do servidor ao numerar. Tente de novo.', true); return null; }
+    const ordinal = res.ord.valor, seq = res.seq ? res.seq.valor : null;
+    const avisos = [];
+    if (res.ord.ocupado) avisos.push('a ' + res.ord.pedido + 'ª notificação desta obra já tinha sido emitida por outro aparelho — esta passou a ser a ' + ordinal + 'ª');
+    if (res.seq && res.seq.ocupado) {
+      const antes = formatarNumero(fmt, { seq: res.seq.pedido, ano, ordinal }), depois = formatarNumero(fmt, { seq, ano, ordinal });
+      if (lido) { // número digitado à mão já usado: pergunta
+        if (!(await confirmar('O número ' + antes + ' já foi usado em outra notificação. Usar o próximo número livre, ' + depois + '?', 'Usar ' + depois))) return null;
+      } else avisos.push('o número ' + antes + ' do rascunho já tinha sido usado — esta ficou com ' + depois);
+    }
+    return fim(seq, ordinal, avisos);
+  }
+  function avisoSemRedeNumero() {
+    return modal('Sem conexão', h('div', {},
+      h('p', {}, 'Para emitir, o número da notificação é reservado no servidor — assim duas notificações nunca saem com o mesmo número.'),
+      h('p', {}, 'O rascunho continua salvo no aparelho. Emita quando estiver com internet.'),
+      h('p', { class: 'dica' }, 'Dica: se for entregar a notificação em campo, emita antes de sair (o documento emitido fica no aparelho e abre sem internet).')),
+      [{ txt: 'Entendi', valor: true, cls: 'pri' }]);
   }
 
   function snapshotAssinantes(lista, pessoas, comFuncao) {
@@ -703,36 +1886,25 @@
         'Qual foi o número da última notificação já emitida para “' + r.apelido + '”? (Informe 0 se esta for a primeira.)', 0);
       if (n === null) { history.back(); return; }
       ordinal = n + 1;
-      if (pode.cadastro()) { r.ultima_notif_anterior = n; await DB.salvar('registros', r, email()); }
+      if (pode.cadastro()) await atualizarCampos('registros', r.id, (o) => { o.ultima_notif_anterior = n; });
     }
-    // numero sequencial do setor
+    // número: com sequencial do setor, só é definido ao emitir (o servidor distribui, sem repetir);
+    // só com a ordem (contratos), já aparece no rascunho e é confirmado ao emitir
     const hoje = X.hojeISO();
     const ano = +hoje.slice(0, 4);
     const fmt = (CONFIG.formato_numero || {})[r.tipo] || '';
-    let seq = null;
-    if (/\{seq\d?\}/.test(fmt)) {
-      const todas = await DB.listar('notificacoes', (n) => n.ano === ano && n.seq);
-      let maxSeq = Math.max(0, ...todas.map((n) => +n.seq || 0));
-      let baseSeq = (CONFIG.seq_base || {})[ano];
-      if (!todas.length && (baseSeq === undefined || baseSeq === null)) {
-        const n = await perguntarNumero('Numeração do setor ' + ano,
-          'Qual foi o último número de notificação emitido pelo setor em ' + ano + '? (Ex.: informe 12 se a última foi 012/' + ano + '. Informe 0 se nenhuma.)', 0);
-        if (n === null) { history.back(); return; }
-        baseSeq = n;
-        if (pode.admin()) { CONFIG.seq_base = Object.assign({}, CONFIG.seq_base, { [ano]: n }); await DB.salvar('config', CONFIG, email()); }
-      }
-      seq = Math.max(maxSeq, +baseSeq || 0) + 1;
-    }
+    const seq = null;
     const pessoas = await pessoasMap();
     const ultima = notifs[0];
     const provPadrao = ((CONFIG.providencias_padrao || {})[r.tipo] || '').replace(/\{nome_texto\}/g, r.n_nome_texto || r.n_nome || '');
     const n = {
       id: DB.uuid(), registroId, tipo: r.tipo, ordinal, seq, ano,
-      numero: formatarNumero(fmt, { seq, ano, ordinal }),
-      data: hoje, data_vistoria: hoje,
-      constatacao: base ? base.constatacao : ((ultima && ultima.constatacao) || (CONFIG.constatacao_padrao || {})[r.tipo] || ''),
+      numero: usaSequencial(fmt) ? '' : formatarNumero(fmt, { seq, ano, ordinal }),
+      data: hoje, data_vistoria: (base && base.data_vistoria) || hoje,
+      visitaId: (base && base.visitaId) || null,
+      constatacao: base && base.constatacao !== undefined ? base.constatacao : ((ultima && ultima.constatacao) || (CONFIG.constatacao_padrao || {})[r.tipo] || ''),
       itens: base ? (base.itens || []).slice() : [],
-      providencias: base ? base.providencias : (ultima ? ultima.providencias || '' : provPadrao),
+      providencias: base && base.providencias !== undefined ? base.providencias : (ultima ? ultima.providencias || '' : provPadrao),
       prazo_dias: r.prazo_dias || CONFIG.prazo_padrao || 3,
       equipe: '',
       fiscais: snapshotAssinantes(r.fiscais && r.fiscais.length ? r.fiscais : fiscaisPadrao(r.tipo), pessoas, true),
@@ -760,6 +1932,7 @@
       const f = await DB.get('fotos', sel.fotoId);
       let blob = await DB.blobGet(sel.fotoId);
       if (!blob && f && Sync.habilitado() && navigator.onLine) { try { blob = await Sync.baixarFoto(f); } catch (e) { /* */ } }
+      if (!blob && (!f || f.excluido)) continue; // foto excluida: fica fora do documento
       if (!blob) { faltando.push(sel); continue; }
       fotosDoc.push({ legenda: sel.legenda || '', imagem: blob });
     }
@@ -772,32 +1945,457 @@
 
   function legendaPadrao(f) {
     if (f.descricao && f.descricao.trim()) return f.descricao.trim().replace(/[.;:]?$/, '.');
-    return 'Foto registrada em ' + X.dataBR(String(f.dataHora || '').slice(0, 10) || X.hojeISO()) + '.';
+    return 'Foto registrada em ' + (dataLocalBR(f.dataHora) || X.dataBR(X.hojeISO())) + '.';
+  }
+
+  /* ---------- Tela "Notificações": todas, com prazo de resposta ---------- */
+  async function telaNotificacoes() {
+    const tk = rotaSeq; // a tela desiste se o usuário já foi para outra
+    titulo('Notificações');
+    const regs = new Map((await DB.all('registros')).map((r) => [r.id, r]));
+    const todas = (await DB.listar('notificacoes')).filter((n) => { const r = regs.get(n.registroId); return r && !r.excluido; })
+      .map((n) => ({ n, sit: situacaoNotif(n), r: regs.get(n.registroId) }));
+    const repetidos = (await numerosRepetidos()).rep;
+    const grupos = [
+      ['pendentes', 'Aguardando resposta', (x) => x.sit.k === 'aguardando' || x.sit.k === 'vencida'],
+      ['vencidas', 'Prazo encerrado', (x) => x.sit.k === 'vencida'],
+      ['nao_enviadas', 'Não enviadas', (x) => x.sit.k === 'nao_enviada'],
+      ['respondidas', 'Respondidas', (x) => x.sit.k === 'respondida'],
+      ['rascunhos', 'Rascunhos', (x) => x.sit.k === 'rascunho'],
+      ['todas', 'Todas', () => true],
+    ];
+    let filtro = sessionStorage.getItem('filtro_notifs') || 'pendentes';
+    const g = grupos.find((x) => x[0] === filtro) || grupos[0];
+    const lista = todas.filter(g[2]).sort((a, b) => a.sit.ordem - b.sit.ordem
+      || (a.sit.k === 'vencida' || a.sit.k === 'aguardando' ? String(prazoDe(a.n)).localeCompare(String(prazoDe(b.n))) : String(b.n.data || '').localeCompare(String(a.n.data || ''))));
+    const filtros = h('div', { class: 'filtros' }, grupos.map(([k, rot, f]) => {
+      const c = todas.filter(f).length;
+      return h('button', { class: k === g[0] ? 'ativo' : '', onclick: () => { sessionStorage.setItem('filtro_notifs', k); telaNotificacoes(); } }, rot + ' (' + c + ')');
+    }));
+    const avisoPermissao = ('Notification' in window) && Notification.permission === 'default' && todas.some((x) => x.sit.k === 'aguardando' || x.sit.k === 'vencida')
+      ? h('div', { class: 'aviso' }, '🔔 Quer ser avisado no celular quando um prazo terminar? ',
+        h('button', { class: 'btn peq', onclick: async () => { try { await Notification.requestPermission(); } catch (e) { /* */ } telaNotificacoes(); } }, 'Ativar avisos'))
+      : null;
+    rcT(tk, avisoPermissao, filtros,
+      lista.length ? h('div', { class: 'lista-linhas' }, ...lista.map(({ n, sit, r }) => linhaLista({
+        href: '#/notificacao/' + n.id, cls: 'item', pend: n._pendente,
+        de: r.apelido || ROTULO[r.tipo],
+        titulo: h('span', {}, (n.ordinal || '?') + 'ª Notificação', h('span', { class: 'so-cel' }, ' · ' + (r.apelido || ROTULO[r.tipo]))),
+        resumo: ROTULO[r.tipo] + ' nº ' + (r.numero || '—') + ' · Nº ' + (n.numero || (n.status === 'emitida' ? '—' : 'a definir na emissão')) + (n.status === 'emitida' ? ' · emitida em ' + dataLocalBR(n.emitidaEm || n.data) : ' · rascunho'),
+        prazos: [n.enviadaEm && !n.respondidaEm
+          ? { rot: 'Prazo de resposta', data: dataCurta(prazoDe(n)), cls: sit.k === 'vencida' ? 'perigo' : sit.restante <= 1 ? 'alerta' : 'info',
+            txt: sit.k === 'vencida' ? 'encerrado há ' + -sit.restante + (sit.restante === -1 ? ' dia' : ' dias') : sit.restante === 0 ? 'termina hoje' : sit.restante === 1 ? 'falta 1 dia útil' : 'faltam ' + sit.restante + ' dias úteis' }
+          : { rot: n.status === 'emitida' ? 'Emitida em' : 'Criada em', data: dataCurtaLocal(n.emitidaEm || n.data), cls: '' }],
+        chips: [repetidos.has(n.id) ? etq('nº repetido', 'perigo') : null, sit.k === 'vencida' || sit.k === 'aguardando' ? null : etq(sit.txt, sit.cls), n.enviadaEm ? etq('enviada ' + X.dataBR(n.enviadaEm), '') : null],
+      })))
+        : h('div', { class: 'vazio' }, g[0] === 'pendentes' ? 'Nenhuma notificação aguardando resposta. 👍' : 'Nada por aqui.'),
+      h('p', { class: 'dica' }, 'O prazo conta em dias úteis a partir do dia seguinte ao envio (sábados, domingos e os feriados cadastrados em Ajustes › Padrões não contam). Para registrar envio ou resposta, abra a notificação.'));
+    App._atualizarTela = () => telaNotificacoes();
+  }
+
+  /* ================================================================== */
+  /* Fila de atendimento (planilha externa, SOMENTE LEITURA)             */
+  /* ================================================================== */
+  // O app nunca escreve na planilha da fila: o servidor só lê os valores exibidos (ação "fila").
+  const semAc = (s) => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+  // "0961-2024", "961/2024", "Conv. nº 0961/2024" -> "961/2024"
+  function chaveConvenio(s) {
+    const t = String(s || '').replace(/(\d)\.(\d)/g, '$1$2');
+    // primeiro "número/ano" do texto ("0961/2024 - 1º TA", "961-2024 lote 03")
+    const na = /(\d+)\s*[\/-]\s*((?:19|20)\d{2}|\d{2})(?!\d)/.exec(t);
+    if (na) return String(parseInt(na[1], 10)) + '/' + (na[2].length === 2 ? '20' + na[2] : na[2]);
+    const m = t.match(/\d+/g);
+    if (!m) return '';
+    if (m.length >= 2) {
+      const ano = m[m.length - 1], num = m[m.length - 2];
+      if (ano.length === 4 || ano.length === 2) return String(parseInt(num, 10)) + '/' + (ano.length === 2 ? '20' + ano : ano);
+    }
+    return String(parseInt(m[0], 10));
+  }
+  function corSituacao(t) {
+    const s = semAc(t);
+    if (!s) return '';
+    if (/indeferid|cancelad|reprovad|vencid|devolvid|arquivad.*sem/.test(s)) return 'perigo';
+    if (/aguardando|sem retorno|inconsist|pendent|diligencia|paralisad/.test(s)) return 'alerta';
+    if (/juntad|conclu|finaliz|aprovad|deferid|assinad|publicad|atendid/.test(s)) return 'ok';
+    if (/elabora|analise|andamento|encaminhad|tramit/.test(s)) return 'info';
+    return '';
+  }
+  let filaMem = null; // última leitura (também guardada no aparelho em kv 'fila_cache')
+  let filaLendo = null;
+  async function filaDoCache() {
+    if (!filaMem) filaMem = await DB.kvGet('fila_cache', null);
+    return filaMem;
+  }
+  /** Lê a fila no servidor. Devolve { dados, erro }: se falhar, "dados" é a última leitura salva. */
+  function lerFila() {
+    if (!filaLendo) filaLendo = (async () => {
+      if (!Sync.habilitado()) return { dados: null, erro: 'local' };
+      if (!navigator.onLine) return { dados: await filaDoCache(), erro: 'Sem internet' };
+      try {
+        const j = await Sync.chamar('fila');
+        const d = { configurada: !!j.configurada, titulo: j.titulo, aba: j.aba, colunas: j.colunas || [], linhas: j.linhas || [], lidoEm: j.lidoEm || new Date().toISOString(), contaServidor: j.contaServidor };
+        filaMem = d;
+        await DB.kvSet('fila_cache', d);
+        return { dados: d, erro: null };
+      } catch (e) {
+        const antigo = /desconhecida/i.test(e.message || '');
+        return { dados: await filaDoCache(), erro: antigo ? 'servidor_antigo' : e.message || String(e), antigo };
+      }
+    })().finally(() => { filaLendo = null; });
+    return filaLendo;
+  }
+  function linhasDoConvenio(dados, r) {
+    const k = chaveConvenio(r.numero);
+    if (!k || !dados || !dados.linhas) return [];
+    return dados.linhas.filter((l) => chaveConvenio(l.convenio) === k);
+  }
+  // Processos já atendidos pela Fiscalização (ex.: STATUS "ENCAMINHADO - CCP") ficam no histórico, ocultos por padrão
+  const chaveSt = (s) => semAc(s).replace(/[^a-z0-9]+/g, ' ').trim();
+  const statusAtendidos = () => String((CONFIG && CONFIG.fila_atendidos != null) ? CONFIG.fila_atendidos : CONFIG_PADRAO.fila_atendidos).split(/\n/).map(chaveSt).filter(Boolean);
+  const atendido = (l) => { const k = chaveSt(l.status); return !!k && statusAtendidos().includes(k); };
+  const btnHistorico = (aberto, n, onclick) => h('button', { class: 'btn peq btn-hist', onclick }, (aberto ? '▾ Ocultar' : '▸ Ver') + ' histórico de atendimento (' + n + ')');
+  function itemFila(l, reg) {
+    const conv = l.convenio ? 'Convênio ' + l.convenio : 'Convênio não informado';
+    return linhaLista({
+      href: reg ? '#/registro/' + reg.id : null, cls: 'item fila-item' + (atendido(l) ? ' atendida' : ''),
+      
+      de: [l.convenio, l.municipio].filter(Boolean).join(' · ') || conv,
+      titulo: h('span', {}, l.solicitacao || 'Solicitação não informada', h('span', { class: 'so-cel' }, ' · ' + [conv, l.municipio].filter(Boolean).join(' · '))),
+      resumo: [l.escola, l.protocolo ? 'Protocolo nº ' + l.protocolo : '', 'linha ' + l.linha + ' da planilha', ...(l.extras || []).map(([k, v]) => k + ': ' + v)].filter(Boolean).join(' · '),
+      chips: [l.status ? etq(l.status, atendido(l) ? 'ok' : '') : null, l.situacao ? etq(l.situacao, corSituacao(l.situacao)) : null,
+        reg ? h('span', { class: 'lin-link' }, 'Abrir “' + (reg.apelido || reg.numero) + '” no app ›') : null],
+    });
+  }
+  const avisoLeitura = (dados, erro) => {
+    if (!erro || erro === 'local') return null;
+    const quando = dados && dados.lidoEm ? ' Mostrando a leitura de ' + dataHoraBR(dados.lidoEm) + '.' : '';
+    if (erro === 'servidor_antigo') return h('div', { class: 'aviso' }, 'O servidor ainda não tem a Fila: o administrador precisa atualizar o Code.gs e publicar uma “Nova versão” da implantação.');
+    return h('div', { class: 'aviso' }, (erro === 'Sem internet' ? 'Sem internet.' : 'Não foi possível ler a planilha agora: ' + erro) + quando);
+  };
+
+  async function telaFila() {
+    const tk = rotaSeq; // a tela desiste se o usuário já foi para outra
+    titulo('Fila de atendimento');
+    if (!Sync.habilitado()) {
+      rcT(tk, h('div', { class: 'vazio' }, 'A Fila de atendimento lê uma planilha do Google pelo servidor do app, então só funciona no modo compartilhado (com login).'));
+      return;
+    }
+    const regs = (await DB.listar('registros')).filter((r) => r.tipo === 'convenio');
+    const porChave = new Map();
+    for (const r of regs) { const k = chaveConvenio(r.numero); if (k && !porChave.has(k)) porChave.set(k, r); }
+    const regDa = (l) => porChave.get(chaveConvenio(l.convenio)) || null;
+
+    let dados = await filaDoCache();
+    let erro = null;
+    const topo = h('div');
+    const resumo = h('div', { class: 'filtros' });
+    const busca = h('input', { type: 'search', placeholder: 'Buscar convênio, município, escola, protocolo…' });
+    const selSol = h('select', {});
+    const selSt = h('select', {});
+    const soApp = h('input', { type: 'checkbox' });
+    const lista = h('div', { class: 'lista-fila lista-linhas' });
+    const historico = h('div');
+    const st = (() => { try { return JSON.parse(sessionStorage.getItem('fila_filtros') || '{}'); } catch (e) { return {}; } })();
+    let verHist = !!st.hist, primeiraMontagem = true;
+    busca.value = st.q || ''; soApp.checked = !!st.soApp;
+    let sit = st.sit || '';
+    const guardar = () => { try { sessionStorage.setItem('fila_filtros', JSON.stringify({ q: busca.value, sol: selSol.value, st: selSt.value, sit, soApp: soApp.checked, hist: verHist })); } catch (e) { /* */ } };
+    const opcoes = (sel, campo, rotuloTodos, valor) => {
+      const ls = (dados && dados.linhas) || [];
+      const cont = new Map();
+      for (const l of ls) { const v = l[campo] || ''; if (v) cont.set(v, (cont.get(v) || 0) + 1); }
+      rc(sel, h('option', { value: '' }, rotuloTodos), ...[...cont.entries()].sort((a, b) => a[0].localeCompare(b[0], 'pt-BR')).map(([v, n]) => h('option', { value: v }, v + ' (' + n + ')')));
+      sel.value = valor || '';
+      if (sel.selectedIndex < 0) sel.value = '';
+    };
+    const desenhar = () => {
+      guardar();
+      const ls = (dados && dados.linhas) || [];
+      const q = semAc(busca.value).trim();
+      const filtradas = ls.filter((l) => (!selSol.value || l.solicitacao === selSol.value) && (!selSt.value || l.status === selSt.value) && (!soApp.checked || regDa(l))
+        && (!q || semAc([l.convenio, l.protocolo, l.municipio, l.escola, l.solicitacao, l.status, l.situacao, ...(l.extras || []).map((x) => x[1])].join(' ')).includes(q)));
+      const base = filtradas.filter((l) => !atendido(l));
+      const hist = filtradas.filter(atendido);
+      const cont = new Map();
+      for (const l of base) { const v = l.situacao || '(sem situação)'; cont.set(v, (cont.get(v) || 0) + 1); }
+      if (sit && !cont.has(sit)) sit = '';
+      rc(resumo, h('button', { class: sit ? '' : 'ativo', onclick: () => { sit = ''; desenhar(); } }, 'Todas (' + base.length + ')'),
+        ...[...cont.entries()].sort((a, b) => b[1] - a[1]).map(([v, n]) => h('button', { class: sit === v ? 'ativo' : '', onclick: () => { sit = sit === v ? '' : v; desenhar(); } }, v + ' (' + n + ')')));
+      const vis = base.filter((l) => !sit || (l.situacao || '(sem situação)') === sit);
+      rc(lista, ...(vis.length ? vis.map((l) => itemFila(l, regDa(l))) : [h('div', { class: 'vazio' }, !ls.length ? 'A planilha não tem linhas preenchidas.' : hist.length && !base.length ? 'Nenhum processo pendente com esses filtros. 👍' : 'Nada encontrado com esses filtros.')]));
+      const abrir = verHist;
+      rc(historico, hist.length ? h('div', { class: 'fila-hist' },
+        btnHistorico(abrir, hist.length, () => { verHist = !abrir; desenhar(); }),
+        abrir ? h('div', {}, h('h3', {}, 'Histórico de atendimento'), h('p', { class: 'dica', style: { marginTop: 0 } }, 'Processos já atendidos pela Fiscalização (status: ' + String(CONFIG.fila_atendidos || '').split(/\n/).filter((x) => x.trim()).join(', ') + ').'), h('div', { class: 'lista-linhas' }, ...hist.map((l) => itemFila(l, regDa(l))))) : null) : null);
+    };
+    const montar = () => {
+      if (!dados || !dados.configurada) {
+        rc(topo, avisoLeitura(dados, erro), dados || !erro ? h('div', { class: 'vazio' }, 'A planilha da fila ainda não foi vinculada.',
+          pode.admin() ? h('div', { style: { marginTop: '12px' } }, h('a', { class: 'btn pri', href: '#/config' }, 'Vincular em Ajustes')) : h('div', { class: 'sub' }, 'Peça ao administrador para vincular em Ajustes.')) : null);
+        rc(resumo); rc(lista); rc(historico); controles.classList.add('oculto');
+        return;
+      }
+      controles.classList.remove('oculto');
+      rc(topo, avisoLeitura(dados, erro),
+        h('div', { class: 'linha', style: { marginBottom: '10px' } },
+          h('div', { class: 'cresce sub' }, '📄 ' + (dados.titulo || 'Planilha') + (dados.aba ? ' › ' + dados.aba : '') + ' · ' + dados.linhas.filter((l) => !atendido(l)).length + ' pendente(s) · ' + dados.linhas.filter(atendido).length + ' atendido(s)', h('br'), 'Lido em ' + dataHoraBR(dados.lidoEm)),
+          h('button', { class: 'btn peq', onclick: () => atualizar(true) }, '↻ Atualizar')));
+      // o filtro salvo só vale ao abrir a tela; depois, vale o que o usuário escolheu (inclusive "Todas")
+      opcoes(selSol, 'solicitacao', 'Todas as solicitações', primeiraMontagem ? st.sol : selSol.value);
+      opcoes(selSt, 'status', 'Todos os status', primeiraMontagem ? st.st : selSt.value);
+      primeiraMontagem = false;
+      desenhar();
+    };
+    const controles = h('div', {},
+      h('div', { class: 'linha-busca' }, busca, selSol, selSt),
+      h('label', { class: 'linha', style: { gap: '6px', marginBottom: '10px', fontSize: '14px' } }, soApp, 'Só convênios cadastrados no app'),
+      resumo);
+    busca.addEventListener('input', desenhar);
+    selSol.addEventListener('change', desenhar);
+    // escolher um status "já atendido" no filtro abre o histórico (e o botão continua podendo fechá-lo)
+    selSt.addEventListener('change', () => { if (selSt.value && atendido({ status: selSt.value })) verHist = true; desenhar(); });
+    soApp.addEventListener('change', desenhar);
+    const rodape = h('p', { class: 'dica' }, 'Somente leitura: estas informações vêm da planilha da fila de atendimento. Para alterar algo, edite a própria planilha no Google Planilhas — o app busca de novo a cada minuto enquanto esta tela está aberta.');
+    rcT(tk, topo, controles, lista, historico, rodape);
+    if (!dados) rc(topo, h('div', { class: 'vazio' }, h('span', { class: 'carregando' }), ' Lendo a planilha…'));
+    else montar();
+
+    let ativo = true;
+    const atualizar = async (manual) => {
+      if (!ativo) return;
+      if (manual) toast('Atualizando…');
+      const r = await lerFila();
+      if (!ativo || !document.contains(lista)) return;
+      dados = r.dados; erro = r.erro;
+      montar();
+      if (manual && !r.erro) toast('Fila atualizada');
+    };
+    const timer = setInterval(() => { if (document.visibilityState === 'visible') atualizar(false); }, 60000);
+    const aoVoltar = () => { if (document.visibilityState === 'visible' && (!dados || Date.now() - new Date(dados.lidoEm).getTime() > 30000)) atualizar(false); };
+    document.addEventListener('visibilitychange', aoVoltar);
+    App._sairTela = () => { ativo = false; clearInterval(timer); document.removeEventListener('visibilitychange', aoVoltar); };
+    if (!manterRolagem || !dados) atualizar(false); // redesenho por dados de outro aparelho: não precisa reler a planilha
+  }
+
+  /* Cartão "Fila de atendimento" dentro de um convênio */
+  function cartaoFilaConvenio(r) {
+    const box = h('div', { class: 'card oculto' });
+    let verHist = false;
+    let ultimo = null;
+    const linha = (l) => h('div', { class: 'fila-linha' + (atendido(l) ? ' atendida' : '') },
+      h('div', { class: 'etqs' }, l.solicitacao ? etq(l.solicitacao, 'info') : null, l.status ? etq(l.status, atendido(l) ? 'ok' : '') : null, l.situacao ? etq(l.situacao, corSituacao(l.situacao)) : null),
+      h('div', { class: 'sub' }, [l.protocolo ? 'Protocolo nº ' + l.protocolo : '', l.escola].filter(Boolean).join(' · ')),
+      ...(l.extras || []).map(([k, v]) => h('div', { class: 'sub' }, k + ': ' + v)));
+    const pintar = (dados, erro) => {
+      ultimo = [dados, erro];
+      if (!dados || !dados.configurada) { box.classList.add('oculto'); return; }
+      const ls = linhasDoConvenio(dados, r);
+      const pend = ls.filter((l) => !atendido(l)), hist = ls.filter(atendido);
+      box.classList.remove('oculto');
+      rc(box, h('h2', {}, 'Fila de atendimento'),
+        !chaveConvenio(r.numero) ? h('p', { class: 'sub' }, 'Informe o número do convênio no cadastro para ver os processos dele na fila.')
+          : !ls.length ? h('p', { class: 'sub' }, 'Nenhum processo deste convênio (' + r.numero + ') na planilha da fila.')
+            : pend.length ? pend.map(linha) : h('p', { class: 'sub' }, 'Nenhum processo pendente deste convênio na fila. 👍'),
+        hist.length ? h('div', { class: 'fila-hist' }, btnHistorico(verHist, hist.length, () => { verHist = !verHist; pintar(...ultimo); }),
+          verHist ? h('div', {}, ...hist.map(linha)) : null) : null,
+        erro && erro !== 'local' ? h('div', { class: 'dica' }, 'Última leitura: ' + dataHoraBR(dados.lidoEm) + ' (sem atualização agora).') : h('div', { class: 'dica' }, 'Somente leitura · atualizado em ' + dataHoraBR(dados.lidoEm) + ' · ', h('a', { href: '#/fila' }, 'ver fila completa')));
+    };
+    if (r.tipo !== 'convenio' || !Sync.habilitado()) return box;
+    (async () => {
+      pintar(await filaDoCache(), null);
+      const ult = filaMem && filaMem.lidoEm ? new Date(filaMem.lidoEm).getTime() : 0;
+      if (Date.now() - ult < 60000) return;
+      const x = await lerFila();
+      pintar(x.dados, x.erro);
+    })().catch((e) => console.error(e));
+    return box;
+  }
+
+  /* Avisos de prazo: número no ícone "Notificações" e aviso no celular quando um prazo termina */
+  let verificandoPrazos = null;
+  function verificarPrazos() {
+    if (!verificandoPrazos) verificandoPrazos = verificarPrazosInterno().finally(() => { verificandoPrazos = null; });
+    return verificandoPrazos;
+  }
+  async function verificarPrazosInterno() {
+    try {
+      const regs = new Map((await DB.all('registros')).map((r) => [r.id, r]));
+      const ativas = (await DB.listar('notificacoes')).filter((n) => { const r = regs.get(n.registroId); return r && !r.excluido && n.status === 'emitida' && n.enviadaEm && !n.respondidaEm; });
+      const vencidas = ativas.filter((n) => situacaoNotif(n).k === 'vencida');
+      const hoje = ativas.filter((n) => { const st = situacaoNotif(n); return st.k === 'aguardando' && st.restante === 0; });
+      const b = document.getElementById('badge-notif');
+      if (b) { b.textContent = vencidas.length || hoje.length || ''; b.className = 'nav-badge' + (vencidas.length ? ' on' : hoje.length ? ' on alerta' : ''); }
+      const avisadas = await DB.kvGet('avisosPrazo', {});
+      const novos = [];
+      const pf = prazoDe;
+      for (const n of vencidas) { const c = n.id + ':' + pf(n); if (!avisadas[c]) novos.push({ n, chave: c, txt: 'terminou em ' + X.dataBR(pf(n)) + ' sem resposta registrada.' }); }
+      for (const n of hoje) { const c = n.id + ':hoje:' + pf(n); if (!avisadas[c]) novos.push({ n, chave: c, txt: 'termina HOJE (' + X.dataBR(pf(n)) + ').' }); }
+      if (!novos.length) return;
+      // grava antes de mostrar: nunca avisa duas vezes a mesma coisa
+      for (const x of novos) avisadas[x.chave] = new Date().toISOString();
+      await DB.kvSet('avisosPrazo', avisadas);
+      const textos = novos.map((x) => (x.n.ordinal || '?') + 'ª Notificação — ' + ((regs.get(x.n.registroId) || {}).apelido || '') + ': o prazo de resposta ' + x.txt);
+      // aviso no celular (se permitido), um por notificação
+      if ('Notification' in window && Notification.permission === 'granted' && navigator.serviceWorker) {
+        try {
+          const reg = await Promise.race([navigator.serviceWorker.ready, new Promise((res) => setTimeout(() => res(null), 3000))]);
+          if (reg) for (let i = 0; i < novos.length; i++) await reg.showNotification('⏰ Prazo de notificação', { body: textos[i], tag: novos[i].chave, data: { url: '#/notificacao/' + novos[i].n.id }, icon: 'icons/icon-192.png' });
+        } catch (e) { /* */ }
+      }
+      // aviso dentro do app: um só, somando tudo
+      if (document.visibilityState === 'visible') toast('⏰ ' + (textos.length === 1 ? textos[0] : textos.length + ' prazos de notificação terminaram ou terminam hoje. Veja a aba Notificações.'), true);
+    } catch (e) { console.warn('prazos', e); }
+  }
+  App.verificarPrazos = verificarPrazos;
+
+  /* ---------- Envio e resposta das notificações ---------- */
+  function aplicarEnvio(o, dataISO) {
+    o.enviadaEm = dataISO;
+    o.prazoDiasEnvio = +o.prazo_dias || 3;
+    o.prazoFinal = prazoFinalUteis(dataISO, o.prazoDiasEnvio);
+    o.enviadaPor = email();
+  }
+  async function pedirDataEnvio(n, inicial) {
+    const d = { data: inicial || X.hojeISO() };
+    const inp = h('input', { type: 'date', value: d.data, max: X.hojeISO(), oninput: (e) => { d.data = e.target.value; prev(); } });
+    const info = h('p', { class: 'sub' });
+    const prev = () => { rc(info, d.data ? 'Prazo de ' + (+n.prazo_dias || 3) + ' dia(s) útil(eis) para ' + quemResponde(n.tipo) + ' responder: até ' + X.dataBR(prazoFinalUteis(d.data, +n.prazo_dias || 3)) + '.' : ''); };
+    prev();
+    const ok = await modal('📨 Registrar envio', h('div', {},
+      h('p', {}, 'Data em que a notificação foi enviada (normalmente hoje). O app passa a contar o prazo a partir do dia seguinte, em dias úteis.'),
+      campo('Data do envio', inp), info),
+    [{ txt: 'Cancelar', valor: false }, { txt: 'Registrar envio', cls: 'pri', valor: true, antes: () => {
+      if (!d.data) { toast('Informe a data.', true); return false; }
+      if (d.data > X.hojeISO()) { toast('A data do envio não pode ser futura.', true); return false; }
+    } }]);
+    return ok ? d : null;
+  }
+  async function pedirResposta(n) {
+    const d = { data: X.hojeISO(), obs: '' };
+    const ok = await modal('✅ Registrar resposta', h('div', {},
+      h('p', {}, 'Data em que ' + quemResponde(n.tipo) + ' respondeu à notificação. A pendência sai da lista de prazos.'),
+      campo('Data da resposta', h('input', { type: 'date', value: d.data, min: n.enviadaEm || null, oninput: (e) => { d.data = e.target.value; } })),
+      campo('Observação (opcional)', inputArea(d, 'obs', { placeholder: 'Ex.: Ofício nº 123/2026 — apresentou cronograma de correção.' }))),
+    [{ txt: 'Cancelar', valor: false }, { txt: 'Registrar', cls: 'ok', valor: true, antes: () => {
+      if (!d.data) { toast('Informe a data.', true); return false; }
+      if (n.enviadaEm && d.data < n.enviadaEm) { toast('A resposta não pode ser anterior ao envio (' + X.dataBR(n.enviadaEm) + ').', true); return false; }
+      if (d.data > X.hojeISO()) { toast('A data da resposta não pode ser futura.', true); return false; }
+    } }]);
+    return ok ? d : null;
+  }
+  function cartaoEnvio(n, r, redesenhar) {
+    const sit = situacaoNotif(n);
+    const card = h('div', { class: 'card' }, h('h2', {}, 'Envio e prazo de resposta'));
+    if (!n.enviadaEm) {
+      ap(card, h('p', { class: 'sub', style: { marginTop: 0 } }, 'Ainda não registrada como enviada. No dia do envio, toque em “📨 Enviado”: o app passa a contar o prazo de ' + (+n.prazo_dias || 3) + ' dia(s) útil(eis) para ' + quemResponde(n.tipo) + ' responder e avisa quando terminar.'));
+      return card;
+    }
+    ap(card,
+      h('div', { class: 'etqs', style: { marginTop: 0, marginBottom: '8px' } }, etq(sit.txt, sit.cls)),
+      h('table', { class: 'tabela-info' },
+        h('tr', {}, h('td', {}, 'Enviada em'), h('td', {}, X.dataBR(n.enviadaEm) + (n.enviadaPor ? ' · por ' + n.enviadaPor : ''))),
+        h('tr', {}, h('td', {}, 'Prazo para resposta'), h('td', {}, (n.prazoDiasEnvio || n.prazo_dias || 3) + ' dia(s) útil(eis) → até ' + X.dataBR(prazoDe(n)))),
+        n.respondidaEm ? h('tr', {}, h('td', {}, 'Respondida em'), h('td', {}, X.dataBR(n.respondidaEm) + (n.respondidaPor ? ' · registrado por ' + n.respondidaPor : ''))) : null,
+        n.respostaObs ? h('tr', {}, h('td', {}, 'Observação'), h('td', {}, n.respostaObs)) : null));
+    if (pode.notificar()) {
+      ap(card, h('div', { class: 'acoes' },
+        !n.respondidaEm ? h('button', { class: 'btn ok', onclick: async () => {
+          const resp = await pedirResposta(n);
+          if (!resp) return;
+          await atualizarCampos('notificacoes', n.id, (o) => { o.respondidaEm = resp.data; o.respostaObs = resp.obs.trim(); o.respondidaPor = email(); });
+          toast('Resposta registrada'); verificarPrazos(); redesenhar();
+        } }, '✅ Registrar resposta') : null,
+        n.respondidaEm ? h('button', { class: 'btn peq', onclick: async () => {
+          if (!(await confirmar('Desfazer o registro da resposta? A notificação volta a aguardar resposta.', 'Desfazer'))) return;
+          await atualizarCampos('notificacoes', n.id, (o) => { delete o.respondidaEm; delete o.respostaObs; delete o.respondidaPor; });
+          verificarPrazos(); redesenhar();
+        } }, 'Desfazer resposta') : null,
+        h('button', { class: 'btn peq', onclick: async () => {
+          const envio = await pedirDataEnvio(n, n.enviadaEm);
+          if (!envio) return;
+          await atualizarCampos('notificacoes', n.id, (o) => aplicarEnvio(o, envio.data));
+          verificarPrazos(); redesenhar();
+        } }, 'Corrigir data de envio'),
+        !n.respondidaEm ? h('button', { class: 'btn peq perigo', onclick: async () => {
+          if (!(await confirmar('Desfazer o registro de envio? O prazo deixa de ser contado.', 'Desfazer', true))) return;
+          await atualizarCampos('notificacoes', n.id, (o) => { delete o.enviadaEm; delete o.prazoFinal; delete o.prazoDiasEnvio; delete o.enviadaPor; });
+          verificarPrazos(); redesenhar();
+        } }, 'Desfazer envio') : null));
+    }
+    return card;
   }
 
   async function telaNotificacao(id) {
+    const tk = rotaSeq; // a tela desiste se o usuário já foi para outra
     const original = await DB.get('notificacoes', id);
-    if (!original || original.excluido) { rc($main, h('div', { class: 'vazio' }, 'Notificação não encontrada.')); return; }
+    if (!original || original.excluido) { rcT(tk, h('div', { class: 'vazio' }, 'Notificação não encontrada.')); return; }
     const r = await DB.get('registros', original.registroId);
-    if (!r) { rc($main, h('div', { class: 'vazio' }, 'Cadastro desta notificação não encontrado.')); return; }
-    marcarNav(r.tipo === 'convenio' ? 'convenios' : 'contratos');
+    if (!r) { rcT(tk, h('div', { class: 'vazio' }, 'Cadastro desta notificação não encontrado.')); return; }
+    marcarNav('notificacoes');
     const n = JSON.parse(JSON.stringify(original));
+    let nBase = clonar(original);
     const emitida = n.status === 'emitida';
     const ro = emitida || !pode.notificar();
     titulo(n.ordinal + 'ª Notificação · ' + r.apelido, true);
     const pessoas = await pessoasMap();
-    const fotosReg = await fotosDe(r.id);
+    const todasFotos = await fotosDe(r.id);
+    const mapaFotos = new Map(todasFotos.map((f) => [f.id, f]));
+    const fotosReg = todasFotos.filter((f) => !(f.irregular && situacao(f) === 'sanada') || (n.fotos || []).some((s) => s.fotoId === f.id));
+    // irregularidades pendentes com foto nova (verificacao "nao sanada"): na grade, aparecem uma vez so, com a foto nova
+    const atualDe = new Map();
+    for (const f of fotosReg) {
+      if (!f.irregular || situacao(f) !== 'pendente') continue;
+      const a = await fotoAtualIrr(f, mapaFotos);
+      if (a.id !== f.id) atualDe.set(f.id, a);
+    }
+    const idsAtuais = new Set([...atualDe.values()].map((a) => a.id));
+    const irrPorFoto = new Map([...atualDe.entries()].map(([irrId, a]) => [a.id, mapaFotos.get(irrId)]));
+    const fotosGrade = fotosReg.map((f) => {
+      if (idsAtuais.has(f.id)) return null; // ja representada pela irregularidade
+      const a = atualDe.get(f.id);
+      return a ? Object.assign({}, a, { irregular: true, descricao: f.descricao, _irr: f }) : f;
+    }).filter(Boolean);
+    const descSel = (s) => { const irr = (s.irrId && mapaFotos.get(s.irrId)) || irrPorFoto.get(s.fotoId); return ((irr || mapaFotos.get(s.fotoId) || {}).descricao) || ''; };
+    const temIrr = (f) => (n.fotos || []).some((s) => s.irrId === f.id || s.fotoId === f.id || (atualDe.get(f.id) && s.fotoId === atualDe.get(f.id).id));
     let sujo = false;
+    // rascunho: troca a foto antiga de uma irregularidade pela foto nova da verificacao
+    if (n.status !== 'emitida') {
+      let trocou = 0;
+      for (const s of n.fotos || []) {
+        const irr = s.irrId ? mapaFotos.get(s.irrId) : ((mapaFotos.get(s.fotoId) || {}).irregular ? mapaFotos.get(s.fotoId) : null);
+        const a = irr && atualDe.get(irr.id);
+        if (a && s.fotoId !== a.id) { s.fotoId = a.id; s.irrId = irr.id; trocou++; }
+      }
+      if (trocou) { sujo = true; setTimeout(() => toast(trocou + ' foto(s) de irregularidade atualizada(s) para a foto mais recente — salve o rascunho.'), 300); }
+    }
     const marcar = () => { sujo = true; };
 
     /* --- cabecalho --- */
-    const ordInp = h('input', { type: 'number', min: '1', value: n.ordinal, readonly: ro, oninput: (e) => { n.ordinal = parseInt(e.target.value, 10) || n.ordinal; marcar(); } });
-    const numInp = inputTxt(n, 'numero', { readonly: ro, oninput: (e) => { n.numero = e.target.value; marcar(); } });
+    const fmtNum = (CONFIG.formato_numero || {})[r.tipo] || '';
+    const seqAuto = usaSequencial(fmtNum);
+    const ordInp = h('input', { type: 'number', min: '1', value: n.ordinal, readonly: ro, oninput: (e) => {
+      const antes = formatarNumero(fmtNum, { seq: n.seq, ano: n.ano, ordinal: n.ordinal });
+      n.ordinal = parseInt(e.target.value, 10) || n.ordinal;
+      // número automático (só com a ordem): acompanha a ordem
+      if (n.numero && n.numero === antes) { n.numero = formatarNumero(fmtNum, { seq: n.seq, ano: n.ano, ordinal: n.ordinal }); numInp.value = n.numero; }
+      marcar();
+    } });
+    const numInp = inputTxt(n, 'numero', { readonly: ro, placeholder: !ro && seqAuto ? 'Definido ao emitir' : '', oninput: (e) => { n.numero = e.target.value.trim() ? e.target.value : ''; marcar(); } });
+    const repetido = emitida ? (await numerosRepetidos()).cont.get(chaveNumero(n)) : null;
+    const avisoRepetido = repetido && repetido.length > 1
+      ? h('div', { class: 'aviso perigo' }, '⚠️ Número repetido: ' + (repetido.length - 1) + ' outra(s) notificação(ões) emitida(s) também têm o nº ' + n.numero + ' (' +
+        repetido.filter((o) => o.id !== n.id).map((o) => (o.ordinal || '?') + 'ª, emitida em ' + dataLocalBR(o.emitidaEm || o.data) + ' por ' + (o.emitidaPor || '—')).join('; ') +
+        '). Um administrador pode reabrir uma delas e corrigir o número.')
+      : null;
     const secCab = h('div', { class: 'card' },
+      avisoRepetido,
       emitida ? h('div', { class: 'aviso' }, '🔒 Notificação emitida em ' + dataHoraBR(n.emitidaEm) + ' por ' + (n.emitidaPor || '—') + '. O conteúdo está bloqueado para preservar o histórico.') : null,
       h('div', { class: 'grade2' },
         campo('Ordem (ª notificação)', ordInp),
-        campo('Número da notificação', numInp, ro ? null : 'Gerado automaticamente — pode ser alterado.'),
+        campo('Número da notificação', numInp, ro ? null : seqAuto
+          ? 'Definido pelo servidor ao emitir — nunca se repete. Se precisar de um número específico, digite aqui.'
+          : 'Gerado automaticamente e confirmado ao emitir — pode ser alterado.'),
         campo('Data da notificação', h('input', { type: 'date', value: n.data, readonly: ro, oninput: (e) => { n.data = e.target.value; marcar(); } })),
         campo('Data da vistoria (in loco)', h('input', { type: 'date', value: n.data_vistoria, readonly: ro, oninput: (e) => { n.data_vistoria = e.target.value; marcar(); } }))));
 
@@ -813,11 +2411,23 @@
       ro ? null : h('div', { class: 'acoes' },
         h('button', { class: 'btn peq', onclick: () => { n.itens = n.itens || []; n.itens.push(''); marcar(); desenharItens(); const t = itensBox.querySelectorAll('textarea'); if (t.length) t[t.length - 1].focus(); } }, '+ Item'),
         h('button', { class: 'btn peq', onclick: async () => {
-          const descs = (n.fotos || []).map((s) => (fotosReg.find((f) => f.id === s.fotoId) || {}).descricao).filter((d) => d && d.trim());
+          const descs = (n.fotos || []).map(descSel).filter((d) => d && d.trim());
           const unicos = [...new Set(descs.map((d) => d.trim().replace(/[.;]?$/, ';')))].filter((d) => !(n.itens || []).includes(d));
           if (!unicos.length) { toast('Nenhuma descrição nova nas fotos selecionadas.'); return; }
           n.itens = (n.itens || []).concat(unicos); marcar(); desenharItens();
-        } }, '⇩ Usar descrições das fotos selecionadas')));
+        } }, '⇩ Usar descrições das fotos selecionadas'),
+        h('button', { class: 'btn peq', onclick: async () => {
+          const pend = fotosReg.filter((f) => f.irregular && situacao(f) === 'pendente' && !temIrr(f))
+            .sort((a, b) => String(a.dataHora).localeCompare(b.dataHora));
+          if (!pend.length) { toast('Todas as irregularidades pendentes já estão na notificação.'); return; }
+          const novas = [];
+          for (const f of pend) novas.push(await selIrregularidade(f, mapaFotos));
+          n.fotos = (n.fotos || []).concat(novas);
+          const novos = [...new Set(pend.map((f) => (f.descricao || '').trim().replace(/[.;]?$/, ';')).filter((d) => d !== ';'))].filter((d) => !(n.itens || []).includes(d));
+          n.itens = (n.itens || []).concat(novos);
+          marcar(); desenharItens(); desenharFotos();
+          toast(pend.length + ' irregularidade(s) pendente(s) incluída(s)');
+        } }, '⇩ Incluir irregularidades pendentes da obra')));
     };
     desenharItens();
     const secFatos = h('div', { class: 'card' }, h('h2', {}, '1. Dos fatos e irregularidades'),
@@ -850,12 +2460,13 @@
     const desenharFotos = () => {
       const selIds = (n.fotos || []).map((s) => s.fotoId);
       const ordenada = h('div', { class: 'lista-ord' }, ...(n.fotos || []).map((s, i) => {
-        const f = fotosReg.find((x) => x.id === s.fotoId) || { id: s.fotoId };
+        const f = mapaFotos.get(s.fotoId) || { id: s.fotoId };
         const img = h('img');
         urlFoto(f).then((u) => { img.src = u; });
         const ta = h('textarea', { readonly: ro, placeholder: 'Legenda', oninput: (e) => { s.legenda = e.target.value; marcar(); } });
         ta.value = s.legenda || '';
-        return h('div', { class: 'li' }, img, h('div', { style: { flex: 1 } }, h('div', { class: 'sub' }, 'Imagem ' + (i + 1)), ta),
+        const nova = s.irrId && s.irrId !== s.fotoId && f.dataHora ? ' · foto atualizada em ' + dataHoraBR(f.dataHora).slice(0, 10) : '';
+        return h('div', { class: 'li' }, img, h('div', { style: { flex: 1 } }, h('div', { class: 'sub' }, 'Imagem ' + (i + 1) + nova), ta),
           ro ? null : h('div', { class: 'ctl' },
             h('button', { class: 'btn peq', disabled: i === 0, onclick: () => { n.fotos.splice(i - 1, 0, n.fotos.splice(i, 1)[0]); marcar(); desenharFotos(); } }, '▲'),
             h('button', { class: 'btn peq', disabled: i === n.fotos.length - 1, onclick: () => { n.fotos.splice(i + 1, 0, n.fotos.splice(i, 1)[0]); marcar(); desenharFotos(); } }, '▼'),
@@ -863,10 +2474,11 @@
       }));
       rc(fotosBox, 
         ro ? null : h('p', { class: 'sub' }, 'Toque nas fotos para incluir/remover do anexo (a ordem de toque define a numeração).'),
-        ro ? null : gradeFotos(fotosReg, { selecionadas: selIds, onclick: (f) => {
-          const i = selIds.indexOf(f.id);
+        ro ? null : gradeFotos(fotosGrade, { selecionadas: selIds, onclick: (f) => {
+          const irr = f._irr;
+          const i = irr ? (n.fotos || []).findIndex((s) => s.fotoId === f.id || s.irrId === irr.id || s.fotoId === irr.id) : selIds.indexOf(f.id);
           if (i >= 0) n.fotos.splice(i, 1);
-          else { n.fotos = n.fotos || []; n.fotos.push({ fotoId: f.id, legenda: legendaPadrao(f) }); }
+          else { n.fotos = n.fotos || []; n.fotos.push(irr ? { fotoId: f.id, irrId: irr.id, legenda: legendaPadrao(irr) } : { fotoId: f.id, legenda: legendaPadrao(f) }); }
           marcar(); desenharFotos();
         } }),
         !fotosReg.length && !ro ? h('div', { class: 'vazio' }, 'Nenhuma foto coletada para esta obra. ', h('a', { href: '#/coleta/' + r.id }, 'Coletar fotos')) : null,
@@ -879,12 +2491,21 @@
     async function salvar(silencioso) {
       if (original.status === 'emitida' && ro) return;
       if (!ro) {
+        // emitida em outro aparelho enquanto esta tela estava aberta: não altera o documento emitido
+        const atualDB = await DB.get('notificacoes', id);
+        if (atualDB && atualDB.status === 'emitida' && nBase.status !== 'emitida') {
+          sujo = false; toast('Esta notificação foi emitida em outro aparelho; as alterações desta tela não foram gravadas.', true);
+          App._sairNotif = null; return;
+        }
+      }
+      if (!ro) {
         n.fiscais = snapshotAssinantes(edFiscais, pessoas, true);
         n.coordenadores = snapshotAssinantes(edCoord, pessoas, false);
         n.itens = (n.itens || []).map((t) => t.trim()).filter(Boolean);
       }
-      Object.assign(original, n);
-      await DB.salvar('notificacoes', original, email());
+      const salvo = await salvarMudancas('notificacoes', nBase, n);
+      Object.assign(original, salvo);
+      nBase = clonar(n);
       sujo = false;
       if (!silencioso) toast('Rascunho salvo');
     }
@@ -892,14 +2513,15 @@
       const erros = [];
       if (!n.data) erros.push('data da notificação');
       if (!n.data_vistoria) erros.push('data da vistoria');
-      if (!n.numero) erros.push('número');
+      if (!n.numero && !seqAuto) erros.push('número');
       if (!edFiscais.length && !(n.fiscais || []).length) erros.push('ao menos um fiscal');
       if (erros.length) { toast('Preencha: ' + erros.join(', '), true); return false; }
       return true;
     }
     async function numeroDuplicado() {
       if (!n.numero) return false;
-      const outras = await DB.listar('notificacoes', (o) => o.id !== n.id && o.numero === n.numero && o.tipo === n.tipo && (o.ano === n.ano || !n.ano) && (n.tipo !== 'contrato' || o.registroId === n.registroId));
+      const k = chaveNumero(n);
+      const outras = await DB.listar('notificacoes', (o) => o.id !== n.id && o.status === 'emitida' && chaveNumero(o) === k);
       return outras.length > 0;
     }
     async function gerar(compartilhar) {
@@ -912,7 +2534,9 @@
       const fundo = h('div', { class: 'modal-fundo' }, h('div', { class: 'modal' }, st));
       document.body.appendChild(fundo);
       try {
-        const { blob, nome } = await gerarDocx(original, r);
+        const alvo = original.status === 'emitida' ? original : Object.assign({}, original, { numero: numeroRascunho(original, r) });
+        const { blob, nome } = await gerarDocx(alvo, r);
+        if (original.status !== 'emitida' && !original.numero && seqAuto) setTimeout(() => toast('Rascunho: o número fica “___” até a notificação ser emitida.'), 2700);
         fundo.remove();
         if (compartilhar) await compartilharBlob(blob, nome, nome);
         else baixarBlob(blob, nome);
@@ -923,44 +2547,73 @@
         toast(e.message, true);
       }
     }
-    async function emitir() {
+    let emitindo = false;
+    async function emitir(comEnvio) {
+      if (emitindo) return;
+      emitindo = true;
+      try { await emitirInterno(comEnvio); } finally { emitindo = false; }
+    }
+    async function emitirInterno(comEnvio) {
       if (!validar()) return;
-      if (await numeroDuplicado() && !(await confirmar('Já existe outra notificação com o número ' + n.numero + '. Emitir mesmo assim?', 'Emitir'))) return;
+      const atualDB = await DB.get('notificacoes', id);
+      if (atualDB && atualDB.status === 'emitida') { toast('Esta notificação já foi emitida (em outro aparelho).', true); telaNotificacao(id); return; }
       if (!(n.fotos || []).length && !(await confirmar('Esta notificação não tem fotos anexas. Emitir mesmo assim?', 'Emitir'))) return;
-      if (!(await confirmar('Ao emitir, o conteúdo fica bloqueado e registrado no histórico. Continuar?', 'Emitir'))) return;
+      let envio = null;
+      if (comEnvio) {
+        envio = await pedirDataEnvio(n);
+        if (!envio) return;
+      } else if (!(await confirmar('Ao emitir, o conteúdo fica bloqueado e registrado no histórico. Continuar?', 'Emitir'))) return;
+      // número: reservado no servidor agora (nunca se repete entre aparelhos)
+      const num = await numerarNaEmissao(n, r);
+      if (!num) return;
+      const atual2 = await DB.get('notificacoes', id);
+      if (atual2 && atual2.status === 'emitida') { toast('Esta notificação já foi emitida (em outro aparelho).', true); telaNotificacao(id); return; }
+      n.numero = num.numero; n.seq = num.seq; n.ano = num.ano; n.ordinal = num.ordinal;
+      numInp.value = n.numero; ordInp.value = n.ordinal;
+      if (await numeroDuplicado() && !(await confirmar('Já existe outra notificação com o número ' + n.numero + '. Emitir mesmo assim?', 'Emitir'))) return;
       await salvar(true);
       const snap = Object.assign({}, r);
-      for (const k of ['_pendente', 'atualizadoEm', 'atualizadoPor', 'criadoEm', 'criadoPor']) delete snap[k];
-      original.registroSnapshot = snap;
-      original.status = n.status = 'emitida';
-      original.emitidaEm = n.emitidaEm = new Date().toISOString();
-      original.emitidaPor = n.emitidaPor = email();
+      for (const k of ['_pendente', '_campos', '_base', 'atualizadoEm', 'atualizadoPor', 'criadoEm', 'criadoPor']) delete snap[k];
+      n.status = 'emitida'; n.emitidaEm = new Date().toISOString(); n.emitidaPor = email();
       sujo = false;
-      await DB.salvar('notificacoes', original, email());
+      const emit = await atualizarCampos('notificacoes', id, (o) => {
+        o.registroSnapshot = snap; o.status = n.status; o.emitidaEm = n.emitidaEm; o.emitidaPor = n.emitidaPor;
+        if (envio) aplicarEnvio(o, envio.data);
+      });
+      Object.assign(original, emit);
       App._sairNotif = null;
       await gerarDireto();
       await telaNotificacao(id);
+      if (num.avisos.length) toast('Número ajustado: ' + num.avisos.join('; ') + '.', true);
     }
 
     const acoes = h('div', { class: 'card' }, h('div', { class: 'acoes', style: { marginTop: 0 } },
       !ro ? h('button', { class: 'btn', onclick: () => salvar() }, '💾 Salvar rascunho') : null,
       h('button', { class: 'btn pri', onclick: () => gerar(false) }, '⬇️ Baixar Word (.docx)'),
       h('button', { class: 'btn', onclick: () => gerar(true) }, '📤 Compartilhar'),
-      !ro ? h('button', { class: 'btn ok', onclick: emitir }, '✅ Emitir') : null),
+      !ro ? h('button', { class: 'btn ok', onclick: () => emitir(false) }, '✅ Emitir') : null,
+      !ro ? h('button', { class: 'btn', onclick: () => emitir(true), title: 'Emite a notificação e registra o envio com a data de hoje' }, '📨 Enviado') : null,
+      emitida && !original.enviadaEm && pode.notificar() ? h('button', { class: 'btn pri', onclick: async () => {
+        const envio = await pedirDataEnvio(original);
+        if (!envio) return;
+        await atualizarCampos('notificacoes', id, (o) => aplicarEnvio(o, envio.data));
+        toast('Envio registrado — prazo até ' + X.dataBR(prazoFinalUteis(envio.data, +original.prazo_dias || 3)));
+        verificarPrazos(); telaNotificacao(id);
+      } }, '📨 Enviado') : null),
       h('div', { class: 'acoes' },
         emitida && pode.notificar() ? h('button', { class: 'btn peq', onclick: () => criarNotificacao(r.id, n) }, '↻ Nova notificação a partir desta (reiteração)') : null,
         emitida && pode.admin() ? h('button', { class: 'btn peq', onclick: async () => {
-          if (!(await confirmar('Reabrir para edição? A notificação voltará a ser rascunho.', 'Reabrir'))) return;
-          original.status = 'rascunho'; delete original.emitidaEm;
-          await DB.salvar('notificacoes', original, email()); telaNotificacao(id);
+          if (!(await confirmar('Reabrir para edição? A notificação voltará a ser rascunho' + (original.enviadaEm ? ' e o registro de envio/resposta será apagado (registre o envio de novo ao reemitir).' : '.'), 'Reabrir'))) return;
+          await atualizarCampos('notificacoes', id, (o) => { o.status = 'rascunho'; delete o.emitidaEm; for (const k of ['enviadaEm', 'prazoFinal', 'prazoDiasEnvio', 'enviadaPor', 'respondidaEm', 'respostaObs', 'respondidaPor']) delete o[k]; });
+          verificarPrazos(); telaNotificacao(id);
         } }, '🔓 Reabrir') : null,
         (!emitida && pode.notificar()) || pode.admin() ? h('button', { class: 'btn peq perigo', onclick: async () => {
           if (!(await confirmar('Excluir esta notificação?', 'Excluir', true))) return;
-          await DB.excluir('notificacoes', id, email()); location.replace('#/registro/' + r.id);
+          await DB.excluir('notificacoes', id, email()); verificarPrazos(); location.replace('#/registro/' + r.id);
         } }, 'Excluir') : null),
       h('p', { class: 'dica' }, 'Dica: para PDF, abra o .docx no Word (celular ou computador) e use “Salvar como PDF”.'));
 
-    rc($main, secCab, secFatos, secProv, secAss, secFotos, acoes);
+    rcT(tk, secCab, emitida ? cartaoEnvio(original, r, () => telaNotificacao(id)) : null, secFatos, secProv, secAss, secFotos, acoes);
     // salvamento automatico do rascunho ao sair da tela
     App._sairNotif = async () => { if (sujo && !ro) await salvar(true); };
   }
@@ -968,7 +2621,90 @@
   /* ================================================================== */
   /* Ajustes                                                             */
   /* ================================================================== */
+  /* Ajustes › Status das obras: o administrador acrescenta, renomeia, reordena ou tira status e escolhe a cor */
+  function cartaoStatusObras() {
+    const ed = {};
+    const carregar = (lista) => lista.map((x) => ({ nome: x.nome, cor: x.cor || 'neutro', encerra: !!x.encerra, orig: x.nome }));
+    for (const t of ['convenio', 'contrato']) ed[t] = carregar(listaStatus(t));
+    const box = { convenio: h('div'), contrato: h('div') };
+    const resumo = { convenio: h('span'), contrato: h('span') };
+    const desenhar = (t, focar) => {
+      const l = ed[t];
+      rc(box[t], ...l.map((x, i) => {
+        const nome = h('input', { type: 'text', value: x.nome, placeholder: 'Nome do status', oninput: (e) => { x.nome = e.target.value; } });
+        const cor = h('select', { onchange: (e) => { x.cor = e.target.value; amostra.className = 'etq ' + x.cor.replace('neutro', ''); } },
+          CORES_STATUS.map(([v, rot]) => h('option', { value: v, selected: x.cor === v ? 'selected' : null }, rot)));
+        const amostra = h('span', { class: 'etq ' + x.cor.replace('neutro', '') }, '●');
+        const mover = (d) => { const j = i + d; if (j < 0 || j >= l.length) return; [l[i], l[j]] = [l[j], l[i]]; desenhar(t); };
+        if (focar && i === l.length - 1) setTimeout(() => nome.focus(), 30);
+        return h('div', { class: 'status-ed' },
+          h('div', { class: 'linha' }, amostra, nome,
+            h('button', { class: 'btn peq perigo', title: 'Tirar da lista', onclick: () => { l.splice(i, 1); desenhar(t); } }, '✕')),
+          h('div', { class: 'linha status-ed-op' }, cor,
+            h('label', { class: 'linha', title: 'Obra encerrada: prazo vencido não aparece como alerta' }, h('input', { type: 'checkbox', checked: x.encerra ? 'checked' : null, onchange: (e) => { x.encerra = e.target.checked; } }), 'encerra'),
+            h('span', { class: 'cresce' }),
+            h('button', { class: 'btn peq', title: 'Subir', disabled: i === 0 ? 'disabled' : null, onclick: () => mover(-1) }, '↑'),
+            h('button', { class: 'btn peq', title: 'Descer', disabled: i === l.length - 1 ? 'disabled' : null, onclick: () => mover(1) }, '↓')));
+      }), h('button', { class: 'btn peq', onclick: () => { l.push({ nome: '', cor: 'neutro', encerra: false, orig: null }); desenhar(t, true); } }, '+ Acrescentar status'));
+      if (resumo[t]) resumo[t].textContent = PLURAL[t] + ' (' + l.length + ' status)';
+    };
+    const salvar = async (ev) => {
+      const limpo = {}, trocas = [];
+      for (const t of ['convenio', 'contrato']) {
+        const vistos = new Set();
+        limpo[t] = [];
+        for (const x of ed[t]) {
+          const nome = String(x.nome || '').replace(/\s+/g, ' ').trim();
+          if (!nome) continue;
+          const k = nome.toLowerCase();
+          if (vistos.has(k)) { toast('Status repetido em ' + PLURAL[t] + ': ' + nome, true); return; }
+          vistos.add(k);
+          limpo[t].push({ nome, cor: x.cor || 'neutro', encerra: !!x.encerra });
+          if (x.orig && x.orig !== nome) trocas.push({ t, de: x.orig, para: nome }); // renomeado
+        }
+        if (!limpo[t].length) { toast('A lista de ' + PLURAL[t].toLowerCase() + ' não pode ficar vazia.', true); return; }
+      }
+      // obras que usam status que saíram da lista: o administrador escolhe o que fazer
+      const regs = await DB.listar('registros');
+      const fora = [];
+      for (const t of ['convenio', 'contrato']) {
+        const cont = new Map();
+        for (const r of regs) if (r.tipo === t && r.status_obra && !limpo[t].some((x) => x.nome === r.status_obra)) cont.set(r.status_obra, (cont.get(r.status_obra) || 0) + 1);
+        for (const [de, n] of cont) fora.push({ t, de, n, para: (trocas.find((x) => x.t === t && x.de === de) || {}).para || '' });
+      }
+      if (fora.length) {
+        const conteudo = h('div', {}, h('p', {}, 'Estas obras usam status que não estão mais na lista. Escolha o novo status de cada uma (ou deixe como está):'),
+          ...fora.map((f) => campo(f.n + ' ' + ROTULO[f.t].toLowerCase() + '(s) com “' + f.de + '”', h('select', { onchange: (e) => { f.para = e.target.value; } },
+            h('option', { value: '' }, 'Deixar como está'),
+            limpo[f.t].map((x) => h('option', { value: x.nome, selected: x.nome === f.para ? 'selected' : null }, 'Trocar por: ' + x.nome))))));
+        const ok = await modal('Obras com status fora da lista', conteudo, [{ txt: 'Cancelar', valor: false }, { txt: 'Salvar', valor: true, cls: 'pri' }]);
+        if (!ok) return;
+      }
+      if (ev && ev.target) ev.target.disabled = true;
+      try {
+        await salvarConfig((o) => { o.status_obra = clonar(limpo); });
+        let n = 0;
+        for (const f of fora) {
+          if (!f.para) continue;
+          for (const r of regs) if (r.tipo === f.t && r.status_obra === f.de) { await atualizarCampos('registros', r.id, (o) => { if (o.status_obra === f.de) o.status_obra = f.para; }); n++; }
+        }
+        toast('Status salvos' + (n ? ' · ' + n + ' obra(s) atualizada(s)' : ''));
+        telaConfig();
+      } catch (e) { toast(e.message, true); if (ev && ev.target) ev.target.disabled = false; }
+    };
+    const card = h('div', { class: 'card' }, h('h2', {}, 'Status das obras'),
+      h('p', { class: 'sub' }, 'Lista que aparece em “Status da obra” no cadastro e no filtro das listas. Vale para toda a equipe. “Encerra”: prazos vencidos da obra com esse status deixam de aparecer como alerta (ex.: concluída, rescindida).'),
+      h('details', { class: 'status-grupo' }, h('summary', {}, resumo.convenio), box.convenio),
+      h('details', { class: 'status-grupo' }, h('summary', {}, resumo.contrato), box.contrato),
+      h('div', { class: 'acoes' },
+        h('button', { class: 'btn pri', onclick: salvar }, 'Salvar status'),
+        h('button', { class: 'btn', onclick: () => { for (const t of ['convenio', 'contrato']) { ed[t] = statusPadrao(t).map((x) => Object.assign(x, { orig: x.nome })); desenhar(t); } toast('Lista original carregada — toque em “Salvar status” para confirmar'); } }, 'Restaurar lista original')));
+    desenhar('convenio'); desenhar('contrato');
+    return card;
+  }
+
   async function telaConfig(sub) {
+    const tk = rotaSeq; // a tela desiste se o usuário já foi para outra
     titulo('Ajustes', !!sub);
     if (sub === 'pessoas') return telaPessoas();
     const u = App.usuario();
@@ -1005,6 +2741,7 @@
         h('div', {}, h('b', {}, u ? u.nome || u.email : '—'), ' ', h('span', { class: 'badge' }, { admin: 'Administrador', fiscal: 'Fiscal', consulta: 'Consulta' }[perfil()] || perfil())),
         h('div', { class: 'sub' }, u ? u.email : ''),
         h('div', { class: 'sub' }, 'Última sincronização: ' + (ult ? dataHoraBR(ult) : 'nunca')),
+        Sync.versaoServidor && Sync.versaoServidor < 5 ? h('div', { class: 'aviso', style: { marginTop: '8px' } }, '⚠️ O servidor (Code.gs) está numa versão antiga, sujeita a perda de sincronismo. O administrador deve colar o Code.gs novo no Apps Script e publicar como nova versão (Guia de publicação, Parte G).') : null,
         Sync.estado === 'erro' ? h('div', { class: 'aviso', style: { marginTop: '8px' } }, Sync.erro) : null,
         Sync.estado === 'sem_acesso' ? h('div', { class: 'aviso', style: { marginTop: '8px' } }, 'Seu e-mail não está autorizado. Peça ao administrador para incluí-lo.') : null,
         !Sync.token() ? h('div', { class: 'sub', style: { marginTop: '8px' } }, 'Sessão expirada — entre novamente para sincronizar:') : null,
@@ -1012,10 +2749,67 @@
         h('div', { class: 'acoes' },
           h('button', { class: 'btn pri', onclick: async () => { await Sync.sincronizar(); telaConfig(); } }, '🔄 Sincronizar agora'),
           h('button', { class: 'btn', onclick: async () => { if (await confirmar('Sair da conta neste aparelho? Os dados locais continuam guardados.', 'Sair')) { Sync.sair(); rotear(); } } }, 'Sair'),
-          h('button', { class: 'btn', onclick: forcarAtualizacao }, 'Recarregar app')));
+          h('button', { class: 'btn', onclick: forcarAtualizacao }, 'Recarregar app'),
+          h('button', { class: 'btn peq', onclick: async () => {
+            if (!(await confirmar('Reenviar ao servidor todos os dados guardados neste aparelho? Use se algo registrado aqui não aparece nos outros celulares. Nada é apagado.', 'Reenviar'))) return;
+            const n = await Sync.reenviarTudo();
+            toast(n + ' registro(s) marcados para reenvio');
+            await Sync.sincronizar(); telaConfig();
+          } }, 'Reenviar dados deste aparelho')));
       if (!Sync.token()) Sync.renderizarBotao(alvo);
     }
     cards.push(contaCard);
+
+    /* diagnostico */
+    if (Sync.habilitado()) {
+      const pendPor = {};
+      for (const e of ['registros', 'pessoas', 'visitas', 'notificacoes', 'fotos', 'config']) pendPor[e] = (await DB.all(e)).filter((o) => o._pendente).length;
+      const fotosSemDrive = (await DB.all('fotos')).filter((f) => !f.driveId && !f.excluido);
+      let semArquivo = 0;
+      for (const f of fotosSemDrive) if (!(await DB.blobGet(f.id))) semArquivo++;
+      const log = Sync.lerLog().slice().reverse();
+      const resumo = {
+        app: '3.7.1', servidor: Sync.versaoServidor || '?', usuario: (u || {}).email, perfil: perfil(), estado: Sync.estado, erro: Sync.erro || '',
+        online: navigator.onLine, ultimaSync: await DB.kvGet('ultimaSync', null), cursor: await DB.kvGet('servidorDesde', 0),
+        pendentes: pendPor, fotosAguardandoEnvio: fotosSemDrive.length - semArquivo, fotosDeOutroAparelhoSemEnvio: semArquivo,
+        aparelho: navigator.userAgent, log,
+      };
+      const txtDiag = JSON.stringify(resumo, null, 1);
+      cards.push(h('details', { class: 'card' },
+        h('summary', { style: { fontWeight: '600', cursor: 'pointer' } }, 'Diagnóstico da sincronização'),
+        h('div', { class: 'sub', style: { marginTop: '8px' } }, 'Pendentes neste aparelho: ' + (Object.entries(pendPor).filter((x) => x[1]).map(([k, v]) => v + ' ' + k).join(', ') || 'nenhum')),
+        h('div', { class: 'sub' }, 'Fotos aguardando envio: ' + resumo.fotosAguardandoEnvio + (semArquivo ? ' · ' + semArquivo + ' foto(s) registradas em outro aparelho ainda não enviadas por ele' : '')),
+        h('div', { class: 'sub' }, 'Servidor: versão ' + resumo.servidor + ' · estado: ' + (Sync.estado || '—')),
+        h('h3', {}, 'Últimos eventos'),
+        log.length ? h('div', { class: 'lista-log' }, log.slice(0, 15).map((x) => h('div', { class: 'sub', style: { borderBottom: '1px solid var(--linha)', padding: '4px 0' } },
+          h('b', {}, dataHoraBR(x.em) + ' · ' + x.tipo), ' — ', x.msg, x.extra ? h('div', { style: { fontSize: '11px', opacity: 0.8, wordBreak: 'break-word' } }, x.extra.slice(0, 200)) : null)))
+          : h('div', { class: 'sub' }, 'Nenhum problema registrado.'),
+        h('div', { class: 'acoes' },
+          h('button', { class: 'btn peq', onclick: async () => {
+            try { await navigator.clipboard.writeText(txtDiag); toast('Diagnóstico copiado — cole na conversa com o suporte'); }
+            catch (e) { baixarBlob(new Blob([txtDiag], { type: 'text/plain' }), 'diagnostico-sincronizacao.txt'); }
+          } }, '📋 Copiar diagnóstico'),
+          h('button', { class: 'btn peq', onclick: () => { Sync.limparLog(); telaConfig(); } }, 'Limpar eventos')),
+        h('p', { class: 'dica' }, 'Os erros do servidor também ficam na aba “log” da planilha.')));
+    }
+
+    /* aparencia e camera */
+    const seg = (opcoes, atual, aoEscolher) => {
+      const box = h('div', { class: 'seg' });
+      const desenhar = (v) => rc(box, opcoes.map(([val, txt]) => h('button', { class: v === val ? 'ativo' : '', onclick: () => { aoEscolher(val); desenhar(val); } }, txt)));
+      desenhar(atual);
+      return box;
+    };
+    let temaAtual = 'auto'; try { temaAtual = localStorage.getItem('tema') || 'auto'; } catch (e) { /* */ }
+    let rapida = false; try { rapida = localStorage.getItem('cam_rapida') === '1'; } catch (e) { /* */ }
+    cards.push(h('div', { class: 'card' }, h('h2', {}, 'Aparência e câmera'),
+      campoBloco('Tema', seg([['auto', 'Automático'], ['claro', 'Claro'], ['escuro', 'Escuro']], temaAtual, aplicarTema)),
+      campoBloco('Câmera nas visitas', seg([['app', 'Câmera do app'], ['aparelho', 'Câmera do celular']], prefCamera(), (v) => { try { localStorage.setItem('camera_pref', v); } catch (e) { /* */ } }),
+        'Câmera do app: fica aberta para várias fotos seguidas, com troca de lente (grande angular quando o celular permite), zoom, toque para focar e flash. Câmera do celular: todos os recursos do aparelho, uma foto por vez.'),
+      h('label', { class: 'linha sub' }, h('input', { type: 'checkbox', checked: rapida ? 'checked' : null, onchange: (e) => { try { localStorage.setItem('cam_rapida', e.target.checked ? '1' : '0'); } catch (er) { /* */ } } }),
+        'Captura rápida (usa o quadro do vídeo, resolução menor)'),
+      h('div', { class: 'acoes' }, h('button', { class: 'btn peq', onclick: testarCameras }, '🔍 Testar câmeras deste celular')),
+      h('div', { class: 'dica' }, 'Mostra quais lentes o celular libera para o app (grande angular, principal, teleobjetiva) e permite escolher qual é usada no botão 0,5.')));
 
     /* assinantes */
     const pessoas = await DB.listar('pessoas');
@@ -1027,6 +2821,7 @@
     /* padroes */
     if (pode.admin()) {
       const c = JSON.parse(JSON.stringify(CONFIG));
+      const baseCfg = clonar(CONFIG);
       const fisc = (c.fiscais_padrao || []).map((pid) => ({ pessoaId: pid }));
       const coord = (c.coordenadores_padrao || []).map((pid) => ({ pessoaId: pid }));
       const funcTxt = { contrato: (c.funcao_padrao.contrato || []).join('\n'), convenio: (c.funcao_padrao.convenio || []).join('\n') };
@@ -1052,22 +2847,80 @@
         campo('Providências padrão — Convênio', inputArea(c.providencias_padrao, 'convenio'), '{nome_texto} é trocado pelo nome da notificada. **texto** = negrito.'),
         campo('Providências complementares padrão — Contrato', inputArea(c.providencias_padrao, 'contrato')),
         campo('Prazo padrão (dias úteis)', inputTxt(c, 'prazo_padrao', { type: 'number', min: '1' })),
+        campo('Feriados (não contam no prazo das notificações)', inputArea(c, 'feriados', { placeholder: '01/01/2026\n20/11/2026\n25/12/2026' }), 'Um por linha: dd/mm/aaaa, ou só dd/mm para os que se repetem todo ano (ex.: 25/12). Nacionais, estaduais e municipais. Sábados e domingos já não contam.'),
+        h('h3', {}, 'Fotos no Google Drive'),
+        campo('Pastas das fotos', inputTxt(c, 'pasta_fotos', { placeholder: '{tipo}-{numero}/{data}' }),
+          'Dentro da pasta Fotos. Use / para criar subpastas. {tipo} = Conv ou Contr · {numero} = nº do contrato/convênio · {apelido} = nome curto · {data} = data da visita (29.09.2026) · {ano} · {visita} = “Visita 3”. Ex.: {tipo}-{numero}/{data} → Conv-013-2023/29.09.2026. Vale para as próximas fotos enviadas.'),
         h('div', { class: 'acoes' }, h('button', { class: 'btn pri', onclick: async () => {
           c.fiscais_padrao = fisc.map((x) => x.pessoaId);
           c.coordenadores_padrao = coord.map((x) => x.pessoaId);
           c.funcao_padrao = { contrato: funcTxt.contrato.split('\n').map((s) => s.trim()).filter(Boolean), convenio: funcTxt.convenio.split('\n').map((s) => s.trim()).filter(Boolean) };
           c.prazo_padrao = parseInt(c.prazo_padrao, 10) || 3;
+          c.pasta_fotos = String(c.pasta_fotos || '').trim() || CONFIG_PADRAO.pasta_fotos;
           c.seq_base = Object.assign({}, c.seq_base);
           if (seqObj.v === '' || seqObj.v === null) delete c.seq_base[anoAtual]; else c.seq_base[anoAtual] = parseInt(seqObj.v, 10) || 0;
-          Object.assign(CONFIG, c);
-          await DB.salvar('config', CONFIG, email());
+          await salvarConfig((o) => { for (const k of Object.keys(c)) if (!CAMPOS_SISTEMA.includes(k) && JSON.stringify(baseCfg[k]) !== JSON.stringify(c[k])) o[k] = clonar(c[k]); });
           toast('Padrões salvos');
         } }, 'Salvar padrões'))));
     }
 
+    /* status das obras (lista editável) */
+    if (pode.admin()) cards.push(cartaoStatusObras());
+
+    /* fila de atendimento (planilha externa somente leitura) */
+    if (Sync.habilitado() && pode.admin()) {
+      const box = h('div', {}, h('span', { class: 'carregando' }));
+      cards.push(h('div', { class: 'card' }, h('h2', {}, 'Fila de atendimento (somente leitura)'), box));
+      const f = { url: '', aba: '' };
+      const at = { v: CONFIG.fila_atendidos == null ? CONFIG_PADRAO.fila_atendidos : CONFIG.fila_atendidos };
+      const passos = (conta) => h('ol', { class: 'sub', style: { paddingLeft: '20px', margin: '6px 0' } },
+        h('li', {}, 'Abra a planilha da fila no Google Planilhas e copie o endereço da barra do navegador.'),
+        h('li', {}, conta ? h('span', {}, 'Se a planilha não for da conta ', h('b', {}, conta), ', clique em Compartilhar e adicione essa conta como ', h('b', {}, 'Leitor'), '.') : h('span', {}, 'Se a planilha for de outra conta, compartilhe-a como ', h('b', {}, 'Leitor'), ' com a conta que publicou o servidor do app.')),
+        h('li', {}, 'Cole o endereço abaixo e toque em “Salvar e testar”.'));
+      const previa = (d) => h('div', {},
+        h('div', { class: 'ok-box', style: { margin: '8px 0' } }, '✔ Lendo “' + d.titulo + '” › ' + d.aba + ': ' + d.linhas.length + ' linha(s). Colunas: ' + d.colunas.filter(Boolean).join(', ')),
+        d.linhas.slice(0, 3).map((l) => h('div', { class: 'sub' }, '• ' + [l.convenio, l.municipio, l.solicitacao, l.situacao].filter(Boolean).join(' · '))));
+      const desenharFila = (d, msgErro) => {
+        const conta = d && d.contaServidor;
+        rc(box,
+          h('p', { class: 'sub' }, 'Mostra na aba “Fila” e em cada convênio a situação dos processos, lida de uma planilha do Google. O app só LÊ essa planilha — nunca altera nada nela. Compartilhando como Leitor, o próprio Google impede qualquer alteração.'),
+          d && d.configurada ? previa(d) : h('div', { class: 'aviso' }, 'Nenhuma planilha vinculada.'),
+          msgErro ? h('div', { class: 'aviso' }, msgErro) : null,
+          d && d.configurada ? h('div', { style: { margin: '10px 0' } },
+            campo('STATUS que significam “já atendido pela Fiscalização” (um por linha)', inputArea(at, 'v', { rows: 2, placeholder: 'ENCAMINHADO - CCP' }),
+              'Processos com esses status ficam ocultos e só aparecem em “Ver histórico de atendimento”. Maiúsculas, acentos e traços não importam.'),
+            h('button', { class: 'btn peq', onclick: async () => { await salvarConfig((o) => { o.fila_atendidos = String(at.v || '').split(/\n/).map((x) => x.trim()).filter(Boolean).join('\n'); }); toast('Status de atendido salvos'); } }, 'Salvar status de atendido')) : null,
+          passos(conta),
+          campo('Endereço (link) da planilha da fila', inputTxt(f, 'url', { placeholder: 'https://docs.google.com/spreadsheets/d/…' })),
+          campo('Nome da aba (opcional)', inputTxt(f, 'aba', { placeholder: 'ex.: CONVÊNIOS — em branco usa a primeira aba' })),
+          h('div', { class: 'acoes' },
+            h('button', { class: 'btn pri', onclick: async (e) => {
+              if (!f.url.trim()) { toast('Cole o endereço da planilha', true); return; }
+              e.target.disabled = true;
+              try {
+                const j = await Sync.chamar('filaConfig', { url: f.url.trim(), aba: f.aba.trim() });
+                filaMem = null; await DB.kvSet('fila_cache', null);
+                f.url = ''; f.aba = '';
+                toast('Planilha da fila vinculada');
+                desenharFila(j, null);
+              } catch (err) { e.target.disabled = false; desenharFila(d, /desconhecida/i.test(err.message) ? 'O servidor ainda não tem a Fila: atualize o Code.gs e publique uma “Nova versão”.' : err.message); }
+            } }, 'Salvar e testar'),
+            (d && d.configurada) || msgErro ? h('button', { class: 'btn perigo', onclick: async () => {
+              if (!(await confirmar('Desvincular a planilha da fila? A planilha em si não é alterada; o app apenas deixa de mostrá-la.', 'Desvincular', true))) return;
+              try { const j = await Sync.chamar('filaConfig', { url: '' }); filaMem = null; await DB.kvSet('fila_cache', null); toast('Desvinculada'); desenharFila(j, null); } catch (err) { toast(err.message, true); }
+            } }, 'Desvincular') : null));
+      };
+      (async () => {
+        if (!navigator.onLine) { desenharFila(null, 'Sem internet.'); return; }
+        try { desenharFila(await Sync.chamar('fila'), null); }
+        catch (err) { desenharFila(null, /desconhecida/i.test(err.message) ? 'O servidor ainda não tem a Fila: atualize o Code.gs e publique uma “Nova versão” da implantação.' : err.message); }
+      })();
+    }
+
     /* modelos */
     const modCard = h('div', { class: 'card' }, h('h2', {}, 'Modelos do Word'));
-    for (const tipo of ['contrato', 'convenio']) {
+    const ROT_MOD = { contrato: 'Notificação — Contrato', convenio: 'Notificação — Convênio', relatorio: 'Relatório fotográfico', irregularidades: 'Relatório de irregularidades' };
+    for (const tipo of ['contrato', 'convenio', 'relatorio', 'irregularidades']) {
       const custom = await DB.arquivoGet('modelo_' + tipo);
       const inp = h('input', { type: 'file', accept: '.docx', class: 'oculto' });
       inp.addEventListener('change', async () => {
@@ -1075,7 +2928,7 @@
         if (!f) return;
         try {
           const tags = await DocGen.listarMarcadores(await f.arrayBuffer());
-          const essenciais = ['ordinal', 'numero_notificacao', 'n_nome', 'objeto', 'data_extenso', '#fotos'];
+          const essenciais = tipo === 'relatorio' ? ['obra', 'data_visita', '#tr:linhas'] : tipo === 'sanadas' || tipo === 'irregularidades' ? ['obra', '#itens'] : ['ordinal', 'numero_notificacao', 'n_nome', 'objeto', 'data_extenso', '#fotos'];
           const falta = essenciais.filter((t) => !tags.includes(t));
           if (falta.length && !(await confirmar('O modelo não contém os marcadores: ' + falta.map((t) => '{' + t + '}').join(', ') + '. Usar mesmo assim?', 'Usar'))) return;
           let driveId = null;
@@ -1083,18 +2936,18 @@
             try { driveId = (await Sync.enviarArquivo('modelo_' + tipo + '.docx', f)).driveId; } catch (e) { toast('Modelo salvo só neste aparelho: ' + e.message, true); }
           }
           await DB.arquivoSet('modelo_' + tipo, f, { nome: f.name, driveId });
-          if (driveId) { CONFIG.modelos = Object.assign({}, CONFIG.modelos, { [tipo]: { driveId, nome: f.name, em: new Date().toISOString() } }); await DB.salvar('config', CONFIG, email()); }
-          toast('Modelo de ' + ROTULO[tipo] + ' atualizado');
+          if (driveId) await salvarConfig((o) => { o.modelos = Object.assign({}, o.modelos, { [tipo]: { driveId, nome: f.name, em: new Date().toISOString() } }); });
+          toast('Modelo atualizado: ' + ROT_MOD[tipo]);
           telaConfig();
         } catch (e) { toast('Arquivo inválido: ' + e.message, true); }
       });
       ap(modCard, h('div', { class: 'linha', style: { margin: '8px 0' } },
-        h('div', { class: 'cresce' }, h('b', {}, ROTULO[tipo]), h('div', { class: 'sub' }, custom ? 'Personalizado: ' + (custom.nome || 'modelo.docx') : 'Modelo original')),
+        h('div', { class: 'cresce' }, h('b', {}, ROT_MOD[tipo]), h('div', { class: 'sub' }, custom ? 'Personalizado: ' + (custom.nome || 'modelo.docx') : 'Modelo original')),
         h('button', { class: 'btn peq', onclick: async () => baixarBlob(new Blob([await modeloDocx(tipo)]), 'modelo_' + tipo + '.docx') }, 'Baixar'),
         pode.admin() ? h('button', { class: 'btn peq', onclick: () => inp.click() }, 'Substituir') : null,
         pode.admin() && custom ? h('button', { class: 'btn peq perigo', onclick: async () => {
           await DB.del('arquivos', 'modelo_' + tipo);
-          if (CONFIG.modelos && CONFIG.modelos[tipo]) { delete CONFIG.modelos[tipo]; await DB.salvar('config', CONFIG, email()); }
+          if (CONFIG.modelos && CONFIG.modelos[tipo]) await salvarConfig((o) => { o.modelos = Object.assign({}, o.modelos); delete o.modelos[tipo]; });
           telaConfig();
         } }, 'Restaurar') : null, inp));
     }
@@ -1138,11 +2991,69 @@
         pode.admin() ? h('button', { class: 'btn', onclick: importarBackup }, '⬆️ Importar') : null,
         pode.admin() ? h('button', { class: 'btn', onclick: carregarExemplos }, 'Carregar exemplos dos modelos') : null)));
 
-    cards.push(h('p', { class: 'dica', style: { textAlign: 'center' } }, 'Notificações Extrajudiciais · v1.0 · dados salvos no aparelho' + (Sync.habilitado() ? ' e no Google Drive do administrador' : '') + ' · ', h('a', { href: 'privacidade.html' }, 'Política de privacidade')));
-    rc($main, ...cards);
+    cards.push(h('p', { class: 'dica', style: { textAlign: 'center' } }, 'Fiscalização de Obras · v3.7.1 · dados salvos no aparelho' + (Sync.habilitado() ? ' e no Google Drive do administrador' : '') + ' · ', h('a', { href: 'privacidade.html' }, 'Política de privacidade')));
+    rcT(tk, ...cards);
+  }
+
+  /* Lista as câmeras que o navegador libera, com o zoom de cada uma, e permite escolher a do botão 0,5 */
+  async function testarCameras() {
+    const corpo = h('div', {}, h('p', {}, h('span', { class: 'carregando' }), ' Verificando as câmeras…'));
+    const fechar = modal('Câmeras deste celular', corpo, [{ txt: 'Fechar', valor: true }]);
+    const info = [];
+    try {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error('Este navegador não permite usar a câmera no app.');
+      try { localStorage.removeItem('cam_perfil'); } catch (e) { /* a câmera do app reconhece as lentes de novo */ }
+      const s0 = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
+      const principal = (s0.getVideoTracks()[0].getSettings() || {}).deviceId;
+      const c0 = s0.getVideoTracks()[0].getCapabilities ? s0.getVideoTracks()[0].getCapabilities() : {};
+      s0.getTracks().forEach((t) => t.stop());
+      const devs = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === 'videoinput');
+      for (const d of devs) {
+        const it = { label: d.label || '(sem nome)', id: d.deviceId, principal: d.deviceId === principal };
+        try {
+          const st = await navigator.mediaDevices.getUserMedia({ video: { deviceId: { exact: d.deviceId } }, audio: false });
+          const t = st.getVideoTracks()[0];
+          const c = t.getCapabilities ? t.getCapabilities() : {};
+          it.facing = (c.facingMode || [])[0] || (t.getSettings() || {}).facingMode || '';
+          it.zmin = c.zoom ? c.zoom.min : null;
+          it.zoom = c.zoom ? 'zoom ' + String(c.zoom.min).replace('.', ',') + '–' + String(c.zoom.max).replace('.', ',') : 'sem zoom';
+          it.res = c.width && c.height ? c.width.max + '×' + c.height.max : '';
+          it.foco = (c.focusMode || []).join('/') || '—';
+          st.getTracks().forEach((x) => x.stop());
+        } catch (e) { it.erro = e.name || e.message; }
+        info.push(it);
+      }
+      const escolhida = localStorage.getItem('lente_05');
+      const logico = c0.zoom && c0.zoom.min < 1;
+      const combinada = !logico && info.find((x) => x.zmin != null && x.zmin < 1 && x.facing !== 'user');
+      rc(corpo,
+        h('p', { class: 'sub', style: { marginTop: 0 } }, devs.length + ' câmera(s) liberada(s) para o app. ' + (logico
+          ? 'A câmera principal tem zoom abaixo de 1x (' + c0.zoom.min + '): o botão ' + String(c0.zoom.min).replace('.', ',') + ' usa esse zoom.'
+          : combinada ? 'A câmera “' + combinada.label + '” tem zoom a partir de ' + String(combinada.zmin).replace('.', ',') + 'x: a câmera do app passa a usá-la, com o botão ' + String(combinada.zmin).replace('.', ',') + ' (grande angular).'
+            : 'Nenhuma câmera tem zoom abaixo de 1x: o botão 0,5 troca para outra câmera traseira.')),
+        info.map((it) => h('div', { class: 'item' },
+          h('div', { class: 't' }, it.label, it.principal ? h('span', { class: 'badge', style: { marginLeft: '6px' } }, 'principal') : null,
+            escolhida === it.label ? h('span', { class: 'badge ok', style: { marginLeft: '6px' } }, 'botão 0,5') : null),
+          h('div', { class: 'd' }, [it.facing === 'user' ? 'frontal' : it.facing === 'environment' ? 'traseira' : it.facing, it.zoom, it.res && 'máx. ' + it.res, it.foco && 'foco ' + it.foco, it.erro && 'erro: ' + it.erro].filter(Boolean).join(' · ')),
+          !it.principal && it.facing !== 'user' ? h('button', { class: 'btn peq', style: { marginTop: '6px' }, onclick: (e) => {
+            try { localStorage.setItem('lente_05', it.label); } catch (er) { /* */ }
+            toast('“' + it.label + '” será usada no botão 0,5'); e.target.textContent = '✓ Usada no botão 0,5';
+          } }, 'Usar esta no botão 0,5') : null)),
+        !info.some((x) => !x.principal && x.facing !== 'user')
+          ? h('div', { class: 'aviso', style: { marginTop: '8px' } }, 'Este celular só libera a câmera traseira principal (e a frontal) para aplicativos da web — a grande angular fica disponível só na câmera do próprio celular. Para fotos com grande angular, use o ícone de celular dentro da câmera do app, ou escolha “Câmera do celular” acima.')
+          : null,
+        h('button', { class: 'btn peq', style: { marginTop: '8px' }, onclick: async () => {
+          const txt = navigator.userAgent + '\n' + JSON.stringify({ zoomPrincipal: c0.zoom || null, cameras: info.map((x) => Object.assign({}, x, { id: undefined })) }, null, 1);
+          try { await navigator.clipboard.writeText(txt); toast('Copiado'); } catch (er) { baixarBlob(new Blob([txt], { type: 'text/plain' }), 'cameras.txt'); }
+        } }, '📋 Copiar resultado'));
+    } catch (e) {
+      rc(corpo, h('div', { class: 'aviso' }, 'Não foi possível verificar as câmeras: ' + (e.message || e.name)));
+    }
+    await fechar;
   }
 
   async function telaPessoas() {
+    const tk = rotaSeq; // a tela desiste se o usuário já foi para outra
     titulo('Assinantes', true);
     const pessoas = (await DB.listar('pessoas')).sort((a, b) => (a.papel + a.nome).localeCompare(b.papel + b.nome));
     const editar = async (p) => {
@@ -1160,7 +3071,8 @@
         p ? { txt: 'Excluir', cls: 'perigo', valor: 'excluir' } : null, { txt: 'Cancelar', valor: null }, { txt: 'Salvar', cls: 'pri', valor: 'salvar' }].filter(Boolean));
       if (r === 'salvar') {
         if (!o.nome) { toast('Informe o nome', true); return; }
-        await DB.salvar('pessoas', o, email()); toast('Salvo');
+        if (p) await salvarMudancas('pessoas', p, o); else await DB.salvar('pessoas', o, email());
+        toast('Salvo');
       } else if (r === 'excluir' && await confirmar('Excluir ' + o.nome + '? Notificações já emitidas não mudam.', 'Excluir', true)) {
         await DB.excluir('pessoas', o.id, email());
       }
@@ -1168,7 +3080,7 @@
     };
     const bloco = (papel) => pessoas.filter((p) => p.papel === papel).map((p) => h('div', { class: 'item', style: { cursor: pode.admin() ? 'pointer' : 'default' }, onclick: () => pode.admin() && editar(p) },
       h('div', { class: 't' }, p.nome), h('div', { class: 'd' }, [p.cargo, p.lotacao, p.extra].filter(Boolean).join(' · '))));
-    rc($main, 
+    rcT(tk, 
       h('p', { class: 'sub' }, 'Alterações aqui valem para as próximas notificações. As já emitidas guardam os nomes da época.'),
       h('h3', { class: 'sub' }, 'Fiscais'), ...bloco('fiscal'),
       h('h3', { class: 'sub' }, 'Coordenadores'), ...bloco('coordenador'));
@@ -1187,10 +3099,10 @@
   async function exportarBackup() {
     const zip = new JSZip();
     const dados = {};
-    for (const e of ['registros', 'pessoas', 'notificacoes', 'fotos', 'config']) dados[e] = await DB.all(e);
+    for (const e of ['registros', 'pessoas', 'visitas', 'notificacoes', 'fotos', 'config']) dados[e] = await DB.all(e);
     zip.file('dados.json', JSON.stringify({ versao: 1, exportadoEm: new Date().toISOString(), dados }, null, 1));
     for (const f of dados.fotos) { const b = await DB.blobGet(f.id); if (b) zip.file('fotos/' + f.id + '.jpg', b); }
-    for (const t of ['contrato', 'convenio']) { const m = await DB.arquivoGet('modelo_' + t); if (m && m.blob) zip.file('modelos/modelo_' + t + '.docx', m.blob); }
+    for (const t of ['contrato', 'convenio', 'relatorio', 'sanadas', 'irregularidades']) { const m = await DB.arquivoGet('modelo_' + t); if (m && m.blob) zip.file('modelos/modelo_' + t + '.docx', m.blob); }
     const blob = await zip.generateAsync({ type: 'blob' });
     baixarBlob(blob, 'backup-notificacoes-' + X.hojeISO() + '.zip');
   }
@@ -1203,7 +3115,16 @@
         const zip = await JSZip.loadAsync(f);
         const j = JSON.parse(await zip.file('dados.json').async('string'));
         if (!(await confirmar('Importar ' + (j.dados.registros || []).length + ' cadastro(s) e ' + (j.dados.notificacoes || []).length + ' notificação(ões)? Itens com o mesmo identificador serão substituídos.', 'Importar'))) return;
-        for (const e of Object.keys(j.dados)) for (const o of j.dados[e]) { o._pendente = true; await DB.put(e, o); }
+        // não substitui o que já está mais novo no aparelho (senão o celular "voltaria no tempo")
+        let ignorados = 0;
+        for (const e of Object.keys(j.dados)) {
+          for (const o of j.dados[e]) {
+            const local = await DB.get(e, o.id);
+            if (local && (local.excluido || String(local.atualizadoEm || '') >= String(o.atualizadoEm || ''))) { ignorados++; continue; }
+            delete o._campos; delete o._base; o._pendente = true; await DB.put(e, o);
+          }
+        }
+        if (ignorados) toast(ignorados + ' registro(s) do backup ignorados: o aparelho já tinha versão mais nova.');
         for (const name of Object.keys(zip.files)) {
           const m = /^fotos\/(.+)\.jpg$/.exec(name);
           if (m) await DB.blobSet(m[1], await zip.file(name).async('blob'));
@@ -1232,13 +3153,14 @@
       numero: '013/2026', processo: 'SEDUC-PRO-2025/62764', os_numero: '02/2026',
       objeto_especifico: 'CONTRATAÇÃO INTEGRADA DE EMPRESA ESPECIALIZADA EM ENGENHARIA E ARQUITETURA PARA ELABORAÇÃO DE SOLUÇÃO COMPLETA INCLUINDO O DESENVOLVIMENTO E EXECUÇÃO COMPLETA DOS PROJETOS BÁSICOS, COMPLEMENTAR E EXECUTIVO PARA A CONSTRUÇÃO DA ESCOLA ESTADUAL DAURY RIVA, LOCALIZADO NO MUNICÍPIO DE SINOP, COM BLOCO EDUCACIONAL DE 24 SALAS DE AULA, REFEITÓRIO COM COZINHA, QUADRA POLIESPORTIVA COM VESTIÁRIO E PISCINA',
       valor: 41797391.43, valor_os: 20795119.72, fiscais: fiscC, coordenadores: ['p-norberto', 'p-andressa'], ultima_notif_anterior: 5, prazo_dias: 3,
+      status_obra: 'Em execução', prazo_execucao: '2027-03-31', vigencia: '2027-06-30',
     }, email());
     await DB.salvar('registros', {
       id: 'ex-convenio-claudia', tipo: 'convenio', apelido: 'CONVÊNIO 0961-2024 - CLÁUDIA',
       n_cnpj: '01.310.499/0001-04', n_nome: 'PREFEITURA MUNICIPAL DE CLÁUDIA', n_nome_texto: 'Prefeitura Municipal de Cláudia',
       n_representante: 'ALTAMIR KURTEN', n_logradouro: 'Av. Gaspar Dutra, S/N', n_cep: '78540-000', n_bairro: 'Centro', n_municipio: 'Cláudia/MT', n_telefone: '(66) 3546-1250',
       objeto: 'Construção de Escola Estadual Florestan Fernandes', numero: '0961-2024', processo: 'SEDUC-PRO-2024/47906', valor: 8021795.36,
-      valor_extenso: 'Oito milhões, vinte e um mil, setecentos e noventa e cinco reais e trinta e seis centavos', vigencia: '2026-11-05',
+      valor_extenso: 'Oito milhões, vinte e um mil, setecentos e noventa e cinco reais e trinta e seis centavos', vigencia: '2026-11-05', status_obra: 'Paralisada',
       fiscais: fiscV, coordenadores: ['p-norberto', 'p-andressa'], ultima_notif_anterior: 2, prazo_dias: 3,
     }, email());
     toast('Exemplos criados');
@@ -1252,7 +3174,11 @@
     if (navigator.storage && navigator.storage.persist) { try { await navigator.storage.persist(); } catch (e) { /* */ } }
     Sync.usuario = Sync.usuarioLocal();
     await carregarConfig();
+    await repararConsistencia();
     atualizarChip();
+    verificarPrazos();
+    setInterval(verificarPrazos, 10 * 60 * 1000);
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') verificarPrazos(); });
     if (!location.hash) location.replace('#/contratos');
     await rotear();
     if (Sync.habilitado()) {
@@ -1262,6 +3188,7 @@
     }
     if ('serviceWorker' in navigator && location.protocol !== 'file:') {
       navigator.serviceWorker.register('sw.js').catch((e) => console.warn('SW', e));
+      navigator.serviceWorker.addEventListener('message', (e) => { if (e.data && e.data.hash) location.hash = e.data.hash; });
     }
   }
   iniciar();
