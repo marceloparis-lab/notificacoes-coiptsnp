@@ -1,7 +1,12 @@
 /* Login Google + sincronizacao com o backend (Google Apps Script) */
 (function (root) {
-  const ENTIDADES = ['pessoas', 'registros', 'visitas', 'notificacoes', 'fotos', 'config'];
+  const ENTIDADES = ['pessoas', 'registros', 'visitas', 'notificacoes', 'fotos', 'config', 'medicoes', 'atividades'];
+  // medições só sincronizam com o servidor versão 11 ou mais nova (o antigo ignoraria e elas se perderiam da equipe);
+  // a atividade (comentários/histórico das obras) com a versão 14
+  const MIN_SERVIDOR = { medicoes: 11, atividades: 14 };
   const Sync = { estado: 'offline', usuario: null, erro: null };
+  // (antes esta linha ficava acima da declaração de Sync e falhava em silêncio: a versão do servidor só era conhecida após o login)
+  try { const v = +localStorage.getItem('versaoServidor'); if (v) Sync.versaoServidor = v; } catch (e) { /* */ }
   const ouvintes = new Set();
   let gisCarregado = null;
   let emAndamento = null;
@@ -65,7 +70,11 @@
     } catch (e) { return null; }
   };
   Sync.usuarioLocal = function () {
-    try { return JSON.parse(localStorage.getItem('usuario') || 'null'); } catch (e) { return null; }
+    try {
+      const u = JSON.parse(localStorage.getItem('usuario') || 'null');
+      if (u && u.foto) { delete u.foto; localStorage.setItem('usuario', JSON.stringify(u)); } // apaga a foto do perfil guardada por versões anteriores
+      return u;
+    } catch (e) { return null; }
   };
   Sync.sair = function () {
     localStorage.removeItem('id_token');
@@ -102,7 +111,8 @@
       callback: async (resp) => {
         localStorage.setItem('id_token', resp.credential);
         const d = decodificar(resp.credential);
-        const u = Object.assign({}, Sync.usuarioLocal() || {}, { email: d.email, nome: d.name, foto: d.picture });
+        const u = Object.assign({}, Sync.usuarioLocal() || {}, { email: d.email, nome: d.name }); // a foto do perfil Google não é guardada (LGPD)
+        delete u.foto;
         localStorage.setItem('usuario', JSON.stringify(u));
         Sync.usuario = u;
         aguardandoToken.forEach((f) => f(resp.credential));
@@ -138,6 +148,8 @@
   };
 
   /* ---------------- Chamada ao backend ---------------- */
+  // tipo de aparelho (aparece para o administrador em "último acesso"); tablet conta como celular
+  Sync.dispositivo = (() => { try { const ua = navigator.userAgent || ''; return /Android|iPhone|iPad|iPod|Mobile/i.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1) ? 'celular' : 'computador'; } catch (e) { return ''; } })();
   Sync.TEMPO_LIMITE = { padrao: 120000, enviarFoto: 180000, baixarArquivo: 180000, enviarArquivo: 180000 };
   // falhas passageiras do Google (planilha/Drive ocupados, tempo esgotado etc.): vale tentar de novo
   const TEMPORARIO = /timed out|tempo limite|Service|Servi[çc]o|temporar|try again|tente novamente|Internal|interno|busy|ocupad|Exceeded|excedid|Limit|Too many|Lock|bloqueio|Rate|unavailable|indispon/i;
@@ -169,7 +181,7 @@
         method: 'POST',
         redirect: 'follow',
         headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-        body: JSON.stringify(Object.assign({ acao, token }, dados || {})),
+        body: JSON.stringify(Object.assign({ acao, token, disp: Sync.dispositivo }, dados || {})),
         signal: ctl ? ctl.signal : undefined,
       });
       txt = await resp.text();
@@ -212,14 +224,28 @@
       err.codigo = j.codigo;
       throw err;
     }
-    if (j.versao) Sync.versaoServidor = j.versao;
+    if (j.versao) { Sync.versaoServidor = j.versao; try { localStorage.setItem('versaoServidor', String(j.versao)); } catch (e) { /* */ } }
     return j;
   }
 
+  /* Nomes da equipe (cadastrados em Ajustes › Usuários do grupo): usados no lugar do e-mail em relatórios e telas */
+  let equipeNomes = null;
+  Sync.guardarEquipe = function (lista) {
+    const m = {};
+    for (const u of lista || []) if (u && u.email && u.nome && String(u.nome).trim()) m[String(u.email).toLowerCase().trim()] = String(u.nome).trim();
+    equipeNomes = m;
+    try { localStorage.setItem('equipeNomes', JSON.stringify(m)); } catch (e) { /* */ }
+  };
+  Sync.nomeDe = function (email) {
+    if (!email) return '';
+    if (!equipeNomes) { try { equipeNomes = JSON.parse(localStorage.getItem('equipeNomes') || '{}') || {}; } catch (e) { equipeNomes = {}; } }
+    return equipeNomes[String(email).toLowerCase().trim()] || email;
+  };
   Sync.quemSou = async function () {
     const j = await Sync.chamar('quemSou');
     if (!j.usuario) throw new Error('Resposta inesperada do servidor (quemSou).');
-    Sync.versaoServidor = j.versao || 1;
+    Sync.versaoServidor = j.versao || 1; try { localStorage.setItem('versaoServidor', String(Sync.versaoServidor)); } catch (e) { /* */ }
+    if (Array.isArray(j.equipe)) Sync.guardarEquipe(j.equipe);
     if (j.sessao) { try { localStorage.setItem('sessao', j.sessao); localStorage.setItem('sessao_exp', String(Date.now() + 29 * 86400000)); } catch (e) { /* */ } }
     const u = Object.assign({}, Sync.usuarioLocal() || {}, j.usuario);
     localStorage.setItem('usuario', JSON.stringify(u));
@@ -236,13 +262,18 @@
   function agendarNovaTentativa() {
     clearTimeout(tentativaAuto);
     const espera = [15, 45, 120, 300, 600][Math.min(Math.max(falhasSeguidas, 1) - 1, 4)] * 1000;
-    tentativaAuto = setTimeout(() => { if (navigator.onLine) Sync.sincronizar(); }, espera);
+    tentativaAuto = setTimeout(() => { if (navigator.onLine) Sync.sincronizar({ forcar: true }); }, espera);
   }
   // falha passageira (sem sinal, Google ocupado/instável): não é erro do app, tenta de novo sozinho
   const passageira = (e) => !!(e && (e.rede || e.temporario || e.codigo === 'OCUPADO' || e.codigo === 'TEMPORARIO' || TEMPORARIO.test(e.message || '')));
 
-  Sync.sincronizar = function () {
-    if (emAndamento) { pedidoDurante = true; return emAndamento; }
+  /* opts.rapido (sincronização disparada por uma gravação feita neste aparelho): a ida ao servidor para receber
+     é pulada quando a consulta de novidades de poucos segundos atrás já mostrou que ninguém mais gravou nada —
+     a sincronização após cada alteração fica bem mais rápida. Se alguém gravar logo depois, a próxima consulta
+     de novidades (10–20 s) busca. opts.forcar (ou sem opções): sempre pergunta ao servidor. */
+  Sync.sincronizar = function (opts) {
+    const forcar = !(opts && opts.rapido) || !!(opts && opts.forcar);
+    if (emAndamento) { pedidoDurante = true; if (forcar) pedidoForcado = true; return emAndamento; }
     pedidoDurante = false;
     emAndamento = (async () => {
       // garante que o corpo rode depois de "emAndamento" receber a promessa (senão o "finally" abaixo
@@ -265,7 +296,8 @@
         try { await enviarAlteracoes(); } catch (e) { guardar(e); }
         // 2) o que os outros aparelhos gravaram — ANTES das fotos (enviar muitas fotos levava minutos e
         //    atrasava tudo o que os colegas registraram)
-        await receberAlteracoes();
+        if (forcar || !(await nadaNovo())) await receberAlteracoes();
+        else Sync.log('rápido', 'nada novo no servidor — recebimento pulado');
         const falhaModelo = await sincronizarModelos();
         // 3) fotos (grandes); o endereço no Drive vai sendo enviado durante o envio
         let fotos = { falhas: [], grave: null };
@@ -299,11 +331,22 @@
       } finally {
         emAndamento = null;
         // alterações feitas durante a sincronização: sincroniza de novo em seguida
-        if (pedidoDurante && Sync.estado !== 'login' && Sync.estado !== 'sem_acesso') { pedidoDurante = false; setTimeout(() => Sync.sincronizar(), 1500); }
+        if (pedidoDurante && Sync.estado !== 'login' && Sync.estado !== 'sem_acesso') { const f = pedidoForcado; pedidoDurante = false; pedidoForcado = false; setTimeout(() => Sync.sincronizar(f ? { forcar: true } : { rapido: true }), 800); }
       }
     })();
     return emAndamento;
   };
+
+  let pedidoForcado = false;
+  // a consulta de novidades (há menos de 25 s) já disse qual é a última gravação do servidor e o aparelho já a tem
+  async function nadaNovo() {
+    if (!Sync._srvUltima || Date.now() - (Sync._novidadesEm || 0) > 25000) return false;
+    if (await DB.kvGet('cursorUrl', null) !== Sync.config().apiUrl) return false;
+    const falhos = await DB.kvGet('recebidosFalhos', {}) || {};
+    if (Object.keys(falhos).length) return false;
+    const visto = await DB.kvGet('vistoServidor', 0);
+    return !!visto && Sync._srvUltima <= visto;
+  }
 
   const perfilAtual = () => ((Sync.usuario || Sync.usuarioLocal() || {}).perfil) || 'consulta';
 
@@ -311,7 +354,7 @@
      para uma foto com problema não deixar o indicador vermelho nem gastar dados sem parar. */
   const ESPERA_FOTO = [60, 300, 1800, 7200, 21600];
   let fotosEmEnvio = false, novidadeDurante = false;
-  const FOTOS_JUNTAS = 2;               // duas fotos por vez (o Apps Script atende pedidos em paralelo)
+  const FOTOS_JUNTAS = 3;               // três fotos por vez (o Apps Script atende pedidos em paralelo)
   const DATA_PASTAS = '2026-09-29';     // antes disso as fotos iam soltas para Fotos/<id>.jpg
   async function enviarFotos() {
     const res = { falhas: [], grave: null };
@@ -420,6 +463,7 @@
           await DB.atualizar(e, o.id, (a) => (a && a._pendente ? (delete a._pendente, a) : undefined));
           continue;
         }
+        if (MIN_SERVIDOR[e] && !((Sync.versaoServidor || 0) >= MIN_SERVIDOR[e])) continue; // fica pendente até o servidor ser atualizado
         const c = Object.assign({}, o); for (const k of DB.CAMPOS_LOCAIS) delete c[k];
         delete c._vb; // nunca reenvia um valor antigo que tenha ficado gravado (servidor anterior à versão 8)
         if (o._campos && o._versaoBase) c._vb = o._versaoBase; // o servidor confere se ninguém mudou o registro desde então
@@ -447,19 +491,18 @@
       (j.falhas || []).forEach((x) => Sync.log('registro recusado', x.e + ' ' + String(x.id).slice(0, 8) + ': ' + x.erro));
       for (const e of Object.keys(lote)) {
         if (servidorAntigo && e === 'visitas') continue; // servidor desatualizado nao grava visitas: mantem pendente
-        for (const o of lote[e]) {
-          if (falhou.has(e + ':' + o.id)) continue; // continua pendente
-          // só limpa se ninguém alterou o registro enquanto ele era enviado
-          // só limpa se o registro continua IGUAL ao que foi enviado (ex.: o endereço da foto no Drive pode ter
-          // chegado durante o envio sem mudar a data de alteração — antes ele se perdia)
-          await DB.atualizar(e, o.id, (a) => {
-            if (!a || !a._pendente) return undefined;
-            if (a.atualizadoEm === o.atualizadoEm && igualAoEnviado(a, o)) { for (const k of DB.CAMPOS_LOCAIS) delete a[k]; return a; }
-            // alterado durante o envio: a base passa a ser o que acabou de ser gravado no servidor
-            if (a._campos) { a._versaoBase = o.atualizadoEm; a._base = Object.assign({}, a._base); for (const k of Object.keys(a._campos)) a._base[k] = jsn(o[k]); return a; }
-            return undefined;
-          });
-        }
+        // só limpa se o registro continua IGUAL ao que foi enviado (ex.: o endereço da foto no Drive pode ter
+        // chegado durante o envio sem mudar a data de alteração — antes ele se perdia). Tudo numa transação só.
+        const itensOk = lote[e].filter((o) => !falhou.has(e + ':' + o.id)).map((o) => ({ id: o.id, fn: (a) => {
+          if (!a || !a._pendente) return undefined;
+          if (a.atualizadoEm === o.atualizadoEm && igualAoEnviado(a, o)) { for (const k of DB.CAMPOS_LOCAIS) delete a[k]; return a; }
+          // alterado durante o envio: a base passa a ser o que acabou de ser gravado no servidor
+          if (a._campos) { a._versaoBase = o.atualizadoEm; a._base = Object.assign({}, a._base); for (const k of Object.keys(a._campos)) a._base[k] = jsn(o[k]); return a; }
+          return undefined;
+        } }));
+        let rs = null;
+        try { rs = await DB.atualizarVarios(e, itensOk); } catch (err) { rs = null; }
+        if (!rs || rs.some((r) => r.erro)) for (const it of itensOk) { try { await DB.atualizar(e, it.id, it.fn); } catch (err) { /* continua pendente: vai de novo */ } }
       }
       // o servidor tinha versão mais nova (ou o registro foi excluído por outro aparelho): o aparelho fica igual ao servidor
       for (const e of Object.keys(j.rejeitados || {})) {
@@ -520,10 +563,15 @@
     if (perfilAtual() === 'consulta') for (const k of DB.CAMPOS_LOCAIS) delete out[k];
     return out;
   }
-  async function aplicarRecebido(e, o) {
+  // prepara o registro recebido e devolve a função que o junta com o do aparelho (para DB.atualizar/atualizarVarios)
+  function prepararRecebido(e, o, marca) {
     if (o && '_vb' in o) { o = Object.assign({}, o); delete o._vb; }
-    let mudou = false;
-    await DB.atualizar(e, o.id, (local) => {
+    // LGPD: CPF do representante não é mais guardado (servidor ainda não atualizado pode mandar)
+    if (o && (e === 'registros' || e === 'notificacoes' || e === 'medicoes')) {
+      if ('n_representante_cpf' in o) { o = Object.assign({}, o); delete o.n_representante_cpf; }
+      if (o.registroSnapshot && typeof o.registroSnapshot === 'object' && 'n_representante_cpf' in o.registroSnapshot) { o = Object.assign({}, o, { registroSnapshot: Object.assign({}, o.registroSnapshot) }); delete o.registroSnapshot.n_representante_cpf; }
+    }
+    return { id: o.id, fn: (local) => {
       if (local) {
         // mesma versao que o aparelho ja tem: nada a fazer
         if (!local._pendente && String(local.atualizadoEm) === String(o.atualizadoEm) && !!local.excluido === !!o.excluido && (e !== 'fotos' || !o.driveId || local.driveId === o.driveId)) return undefined;
@@ -535,14 +583,37 @@
         }
         if (local._pendente && !o.excluido) {
           // alterações ainda não enviadas: junta campo a campo (registros de versões antigas: vence a mais nova)
-          if (local._campos) { mudou = true; return mesclar(e, local, o); }
+          if (local._campos) { marca.mudou = true; return mesclar(e, local, o); }
           if (String(local.atualizadoEm) > String(o.atualizadoEm)) return undefined;
         }
       }
-      mudou = true;
+      marca.mudou = true;
       return mesclar(e, local, o);
-    });
-    return mudou;
+    } };
+  }
+  async function aplicarRecebido(e, o) {
+    const marca = { mudou: false };
+    const it = prepararRecebido(e, o, marca);
+    await DB.atualizar(e, it.id, it.fn);
+    return marca.mudou;
+  }
+  /* Uma página inteira de uma entidade numa transação só (antes: uma transação por registro — a primeira
+     sincronização de um aparelho novo, com milhares de registros, levava minutos). Se a transação falhar,
+     tenta um a um. Devolve quantos mudaram e os que não puderam ser gravados. */
+  async function aplicarRecebidos(e, lista) {
+    const marcas = lista.map(() => ({ mudou: false }));
+    const itens = lista.map((o, i) => prepararRecebido(e, o, marcas[i]));
+    let res = null;
+    try { res = await DB.atualizarVarios(e, itens); } catch (err) { res = null; }
+    let total = 0; const falhos = [];
+    if (res) {
+      res.forEach((r, i) => { if (r.erro) falhos.push({ o: lista[i], erro: r.erro }); else if (marcas[i].mudou) total++; });
+      return { total, falhos };
+    }
+    for (const o of lista) {
+      try { if (await aplicarRecebido(e, o)) total++; } catch (err) { falhos.push({ o, erro: err }); }
+    }
+    return { total, falhos };
   }
 
   async function receberAlteracoes() {
@@ -568,14 +639,15 @@
         }
       }
       for (const e of ENTIDADES) {
-        for (const o of (j.dados[e] || [])) {
-          if (!o || !o.id) continue;
-          try { if (await aplicarRecebido(e, o)) total++; } catch (err) {
-            // não conseguiu gravar no aparelho (memória cheia, app em segundo plano…): guarda para tentar de novo
-            // (antes o registro era pulado para sempre, porque o cursor avançava)
-            falhos[e + ':' + o.id] = { e, o };
-            Sync.log('erro ao gravar recebido', e + ' ' + String(o.id).slice(0, 8) + ': ' + err.message);
-          }
+        const lista = (j.dados[e] || []).filter((o) => o && o.id);
+        if (!lista.length) continue;
+        const r = await aplicarRecebidos(e, lista);
+        total += r.total;
+        for (const f of r.falhos) {
+          // não conseguiu gravar no aparelho (memória cheia, app em segundo plano…): guarda para tentar de novo
+          // (antes o registro era pulado para sempre, porque o cursor avançava)
+          falhos[e + ':' + f.o.id] = { e, o: f.o };
+          Sync.log('erro ao gravar recebido', e + ' ' + String(f.o.id).slice(0, 8) + ': ' + ((f.erro && f.erro.message) || f.erro));
         }
       }
       if (Object.keys(falhos).length) { try { await DB.kvSet('recebidosFalhos', falhos); } catch (err) { continue; /* nem isso: repete a página */ } }
@@ -644,6 +716,7 @@
     if (!Sync.token() || Sync.estado === 'login' || Sync.estado === 'sem_acesso') return; // nunca abre tela de login sozinho
     try {
       const j = await chamarUmaVez('novidades');
+      if (j && typeof j.ultima === 'number') { Sync._srvUltima = j.ultima; Sync._novidadesEm = Date.now(); }
       if (!Sync._ultimaVista) Sync._ultimaVista = j.ultima; // primeira consulta: a sincronização normal já acontece ao abrir
       else if (j.ultima > Sync._ultimaVista) {
         Sync._atividade = Date.now();
@@ -664,9 +737,9 @@
     Sync.verificarNovidades();
   }, 5000);
 
-  root.addEventListener('online', () => { Sync.log('conexão', 'internet voltou'); Sync.sincronizar(); });
+  root.addEventListener('online', () => { Sync.log('conexão', 'internet voltou'); Sync.sincronizar({ forcar: true }); });
   // ao voltar para o app (iPhone/Android suspendem o app em segundo plano): sincroniza se já faz um tempo
-  const aoVoltar = () => { if (document.visibilityState === 'visible' && Sync.habilitado() && navigator.onLine && Date.now() - Sync.ultimaTentativa > 20000) Sync.sincronizar(); };
+  const aoVoltar = () => { if (document.visibilityState === 'visible' && Sync.habilitado() && navigator.onLine && Date.now() - Sync.ultimaTentativa > 20000) Sync.sincronizar({ forcar: true }); };
   if (root.document) { document.addEventListener('visibilitychange', aoVoltar); root.addEventListener('pageshow', aoVoltar); root.addEventListener('focus', aoVoltar); }
   root.addEventListener('offline', () => {
     // a conexao caiu: cancela os pedidos em andamento para a sincronizacao nao ficar presa esperando

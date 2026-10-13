@@ -1,8 +1,8 @@
 /* Banco local (IndexedDB) - funciona 100% offline */
 (function (root) {
   const NOME = 'notificacoes-app';
-  const VERSAO = 2;
-  const STORES = ['registros', 'pessoas', 'notificacoes', 'fotos', 'visitas', 'config', 'blobs', 'arquivos', 'kv'];
+  const VERSAO = 4;
+  const STORES = ['registros', 'pessoas', 'notificacoes', 'fotos', 'visitas', 'medicoes', 'atividades', 'config', 'blobs', 'arquivos', 'kv'];
   let dbp = null;
 
   function abrir() {
@@ -14,7 +14,7 @@
         for (const s of STORES) {
           if (!db.objectStoreNames.contains(s)) {
             const os = db.createObjectStore(s, { keyPath: s === 'blobs' || s === 'arquivos' || s === 'kv' ? 'k' : 'id' });
-            if (s === 'notificacoes' || s === 'fotos' || s === 'visitas') os.createIndex('registroId', 'registroId');
+            if (s === 'notificacoes' || s === 'fotos' || s === 'visitas' || s === 'medicoes' || s === 'atividades') os.createIndex('registroId', 'registroId');
           }
         }
         const fotos = rq.transaction.objectStore('fotos');
@@ -66,7 +66,11 @@
     async kvGet(k, def) { const r = await DB.get('kv', k); return r ? r.v : def; },
     kvSet: (k, v) => DB.put('kv', { k, v }),
     async blobGet(id) { const r = await DB.get('blobs', id); return r ? r.blob : null; },
-    blobSet: (id, blob) => DB.put('blobs', { k: id, blob }),
+    blobSet: (id, blob) => DB.put('blobs', { k: id, blob, em: Date.now() }),
+    // chaves de um store sem ler os registros (rápido mesmo com milhares de fotos)
+    chaves: (store) => tx(store, 'readonly', (os) => req(os.getAllKeys())),
+    // tamanho de cada foto guardada (só lê o Blob, que o navegador não carrega na memória)
+    async blobInfo(id) { const r = await DB.get('blobs', id); return r && r.blob ? { tam: r.blob.size || 0, em: r.em || 0 } : null; },
     async arquivoGet(k) { return DB.get('arquivos', k); },
     arquivoSet: (k, blob, info) => DB.put('arquivos', Object.assign({ k, blob }, info || {})),
   };
@@ -90,6 +94,22 @@
       p.onerror = () => rej(p.error);
     };
   }));
+
+  /* Vários registros do mesmo store numa única transação (muito mais rápido que uma por registro).
+     itens: [{ id, fn }] como em DB.atualizar. Devolve um array com o resultado de cada um ({ ok, v } ou { erro }).
+     Um erro num item não derruba os outros. */
+  DB.atualizarVarios = (store, itens) => (!itens.length ? Promise.resolve([]) : tx(store, 'readwrite', (os) => Promise.all(itens.map((it) => new Promise((res) => {
+    const g = os.get(it.id);
+    g.onerror = (ev) => { if (ev && ev.preventDefault) ev.preventDefault(); res({ erro: g.error }); };
+    g.onsuccess = () => {
+      let novo;
+      try { novo = it.fn(g.result); } catch (e) { res({ erro: e }); return; }
+      if (novo === undefined) { res({ ok: true, v: g.result }); return; }
+      const p = os.put(novo);
+      p.onsuccess = () => res({ ok: true, v: novo });
+      p.onerror = (ev) => { if (ev && ev.preventDefault) ev.preventDefault(); res({ erro: p.error }); };
+    };
+  })))));
 
   /* Carimbo de alteração: nunca anterior ao da versão atual (relógio do celular atrasado não pode
      fazer uma edição "perder" para a versão que ela mesma está alterando). */
